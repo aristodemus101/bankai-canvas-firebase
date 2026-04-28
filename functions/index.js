@@ -16,6 +16,15 @@ const MODEL_CANDIDATES = [
   "gemini-2.0-flash-lite",
   "gemini-2.0-flash-lite-001",
 ];
+const BUDGETS = {
+  semanticMaxEntries: 120,
+  semanticMaxOutputTokens: 300,
+  singleMaxOutputTokens: 900,
+  multiMaxOutputTokens: 1400,
+  sourceMaxChars: 7500,
+  urlExtractMaxChars: 8000,
+  requestTimeoutMs: 20000,
+};
 
 function cleanJson(rawText) {
   const cleaned = String(rawText || "")
@@ -30,23 +39,35 @@ async function callGeminiJson({ key, prompt, maxOutputTokens = 1200 }) {
   let lastErrText = "";
 
   for (const model of MODEL_CANDIDATES) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BUDGETS.requestTimeoutMs);
     const body = {
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens },
+      generationConfig: {
+        temperature: 0.1,
+        topK: 20,
+        maxOutputTokens,
+      },
     };
 
     if (model.startsWith("gemini-2.5")) {
       body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
     }
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }
-    );
+    let response;
+    try {
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (response.ok) {
       data = await response.json();
@@ -104,7 +125,7 @@ async function extractFromUrl(url) {
 
   const title = normalizeWhitespace(titleMatch ? titleMatch[1] : "");
   const description = normalizeWhitespace(descMatch ? descMatch[1] : "");
-  const text = stripHtml(html).slice(0, 12000);
+  const text = stripHtml(html).slice(0, BUDGETS.urlExtractMaxChars);
 
   return { title, description, text, fetchedAt: new Date().toISOString() };
 }
@@ -143,7 +164,7 @@ exports.summarize = onRequest(
           return res.status(400).json({ error: "Missing query or entries" });
         }
 
-        const compactEntries = entries.slice(0, 250).map((e, idx) => ({
+        const compactEntries = entries.slice(0, BUDGETS.semanticMaxEntries).map((e, idx) => ({
           id: e.id || `row_${idx + 1}`,
           title: e.title || "",
           summary: e.summary || "",
@@ -166,7 +187,7 @@ Query: ${String(query).slice(0, 500)}
 Entries JSON:
 ${JSON.stringify(compactEntries).slice(0, 150000)}`;
 
-        const ranked = await callGeminiJson({ key, prompt, maxOutputTokens: 800 });
+        const ranked = await callGeminiJson({ key, prompt, maxOutputTokens: BUDGETS.semanticMaxOutputTokens });
         return res.status(200).json({
           ids: Array.isArray(ranked.ids) ? ranked.ids : [],
           explanation: ranked.explanation || "",
@@ -219,7 +240,7 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text.
 Rules:
 - Each initiative should represent one distinct use case or program.
 - Include initiatives from different banks separately when present.
-- Return up to 20 initiatives, ordered by relevance and specificity.
+- Return up to 12 initiatives, ordered by relevance and specificity.
 - If only one initiative exists, return one item in initiatives.
 `
         : `You are a banking & fintech research analyst. Analyze the following source material about AI use cases in banking.
@@ -244,9 +265,13 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fi
 }
 
 `;
-      const prompt = `${instruction}\nContent:\n${sourceText.slice(0, 11000)}`;
+      const prompt = `${instruction}\nContent:\n${sourceText.slice(0, BUDGETS.sourceMaxChars)}`;
 
-      const parsed = await callGeminiJson({ key, prompt, maxOutputTokens: isMulti ? 2500 : 1400 });
+      const parsed = await callGeminiJson({
+        key,
+        prompt,
+        maxOutputTokens: isMulti ? BUDGETS.multiMaxOutputTokens : BUDGETS.singleMaxOutputTokens,
+      });
       return res.status(200).json({
         ...parsed,
         extracted: extracted || null,
