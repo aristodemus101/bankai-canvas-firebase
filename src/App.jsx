@@ -241,6 +241,8 @@ export default function App() {
   const [fStatus, setFStatus] = useState("All");
   const [isDragOver, setIsDragOver] = useState(false);
   const [queue, setQueue] = useState([]);
+  const [pendingCards, setPendingCards] = useState([]);
+  const [successToasts, setSuccessToasts] = useState([]);
   const [pasteFlash, setPasteFlash] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -256,6 +258,33 @@ export default function App() {
     return id;
   };
   const dequeue = (id) => setQueue(q => q.filter(x => x.id !== id));
+
+  const pushPendingCard = (id, title, sourceType) => {
+    setPendingCards(cards => [{ id, title, sourceType, status: "analyzing" }, ...cards]);
+  };
+
+  const finishPendingCard = (id, status) => {
+    setPendingCards(cards => cards.map(c => (c.id === id ? { ...c, status } : c)));
+    setTimeout(() => {
+      setPendingCards(cards => cards.filter(c => c.id !== id));
+    }, status === "done" ? 1400 : 2600);
+  };
+
+  const pushSuccessToast = (text) => {
+    const id = Math.random().toString(36).slice(2);
+    setSuccessToasts(t => [...t, { id, text }]);
+    setTimeout(() => {
+      setSuccessToasts(t => t.filter(x => x.id !== id));
+    }, 2600);
+  };
+
+  const goHomeView = () => {
+    setView("canvas");
+    setSearch("");
+    setFCat("All");
+    setFBank("All");
+    setFStatus("All");
+  };
 
   /* ─── Auth listener ─── */
   useEffect(() => {
@@ -312,29 +341,53 @@ export default function App() {
   });
 
   const ingestUrl = async (url) => {
-    const id = enqueue(url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 50));
-    const ai = await aiSummarize(`Analyze this URL about AI use cases in banking: ${url}`, user);
-    await addEntry(baseEntry({
-      title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
-      sourceType: "URL", url, bank: ai.bank_mentioned, category: ai.category,
-      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-    }));
-    dequeue(id);
+    goHomeView();
+    const label = url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 50);
+    const id = enqueue(label);
+    pushPendingCard(id, label, "URL");
+    try {
+      const ai = await aiSummarize(`Analyze this URL about AI use cases in banking: ${url}`, user);
+      const entry = baseEntry({
+        title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
+        sourceType: "URL", url, bank: ai.bank_mentioned, category: ai.category,
+        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
+      });
+      await addEntry(entry);
+      finishPendingCard(id, "done");
+      pushSuccessToast(`Added to canvas: ${entry.title}`);
+    } catch {
+      finishPendingCard(id, "error");
+    } finally {
+      dequeue(id);
+    }
   };
 
   const ingestText = async (text) => {
-    const id = enqueue(text.slice(0, 50).replace(/\n/g, " ") + "…");
-    const ai = await aiSummarize(text, user);
-    await addEntry(baseEntry({
-      title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
-      sourceType: "Text", bank: ai.bank_mentioned, category: ai.category,
-      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-    }));
-    dequeue(id);
+    goHomeView();
+    const label = text.slice(0, 50).replace(/\n/g, " ") + "…";
+    const id = enqueue(label);
+    pushPendingCard(id, label, "Text");
+    try {
+      const ai = await aiSummarize(text, user);
+      const entry = baseEntry({
+        title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
+        sourceType: "Text", bank: ai.bank_mentioned, category: ai.category,
+        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
+      });
+      await addEntry(entry);
+      finishPendingCard(id, "done");
+      pushSuccessToast(`Added to canvas: ${entry.title}`);
+    } catch {
+      finishPendingCard(id, "error");
+    } finally {
+      dequeue(id);
+    }
   };
 
   const ingestFile = async (file) => {
+    goHomeView();
     const id = enqueue(file.name.slice(0, 50));
+    pushPendingCard(id, file.name, "File");
     let sType = "File";
     if (file.type.includes("pdf")) sType = "PDF";
     else if (file.type.startsWith("image")) sType = "Image";
@@ -343,12 +396,20 @@ export default function App() {
     if (file.type.startsWith("text") || file.name.match(/\.(csv|txt|md|json)$/i)) {
       text += "\n" + (await file.text()).slice(0, 4000);
     }
-    const ai = await aiSummarize(text, user);
-    await addEntry(baseEntry({
-      title: file.name, sourceType: sType, bank: ai.bank_mentioned, category: ai.category,
-      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-    }));
-    dequeue(id);
+    try {
+      const ai = await aiSummarize(text, user);
+      const entry = baseEntry({
+        title: file.name, sourceType: sType, bank: ai.bank_mentioned, category: ai.category,
+        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
+      });
+      await addEntry(entry);
+      finishPendingCard(id, "done");
+      pushSuccessToast(`Added to canvas: ${entry.title}`);
+    } catch {
+      finishPendingCard(id, "error");
+    } finally {
+      dequeue(id);
+    }
   };
 
   const onDrop = (e) => {
@@ -500,6 +561,29 @@ export default function App() {
           pointerEvents:"none",
         }}>
           ⌘V detected — analyzing…
+        </div>
+      )}
+
+      {/* Success toasts */}
+      {successToasts.length > 0 && (
+        <div style={{ position:"fixed", top:64, right:20, zIndex:1002, display:"flex", flexDirection:"column", gap:8 }}>
+          {successToasts.map(t => (
+            <div key={t.id} style={{
+              background:C.panel,
+              border:`1px solid ${C.teal}66`,
+              color:C.text,
+              borderRadius:10,
+              padding:"10px 14px",
+              fontSize:12,
+              minWidth:220,
+              maxWidth:360,
+              boxShadow:"0 8px 24px rgba(2,6,23,0.14)",
+              animation:"fadein .2s ease",
+            }}>
+              <span style={{ color:C.teal, fontWeight:800, marginRight:6 }}>✓</span>
+              <span>{t.text}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -669,6 +753,34 @@ export default function App() {
               or press <kbd style={{background:C.border,borderRadius:4,padding:"1px 6px",fontSize:11,fontFamily:"inherit"}}>⌘V</kbd> anywhere to paste instantly
             </div>
           </div>
+
+          {/* Processing stack */}
+          {pendingCards.length > 0 && (
+            <div style={{ marginBottom:18 }}>
+              <div style={{ fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", letterSpacing:".6px", marginBottom:8 }}>
+                Processing {pendingCards.length} item{pendingCards.length>1?"s":""}
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(270px,1fr))", gap:10 }}>
+                {pendingCards.map(card => (
+                  <div key={card.id} style={{
+                    background:C.panel,
+                    border:`1px solid ${card.status==="error" ? C.rose : C.border}`,
+                    borderRadius:10,
+                    padding:12,
+                    boxShadow:"0 1px 4px rgba(0,0,0,0.06)",
+                  }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", gap:8, alignItems:"center", marginBottom:6 }}>
+                      <div style={{ fontSize:12, fontWeight:700, color:C.text, overflowWrap:"anywhere" }}>{card.title}</div>
+                      <span style={pill(C.accentSoft, C.accent)}>{card.sourceType}</span>
+                    </div>
+                    <div style={{ fontSize:11, color:card.status==="error"?C.rose:(card.status==="done"?C.teal:C.dim), fontWeight:700 }}>
+                      {card.status === "analyzing" ? "Analyzing..." : card.status === "done" ? "Added to canvas" : "Could not add this source"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Cards */}
           {filtered.length > 0 ? (
