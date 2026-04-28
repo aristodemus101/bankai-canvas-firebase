@@ -31,22 +31,40 @@ const COLLECTION = "research_entries";
 /* ═══════════════════════════════════════════
    GEMINI AI — calls your Cloud Function
    ═══════════════════════════════════════════ */
-// After deploying, replace this URL with your actual function URL
-const SUMMARIZE_URL = import.meta.env.VITE_SUMMARIZE_URL || "/api/summarize";
+// Prefer explicit env URL, then hosting rewrite, then direct Cloud Function URL.
+const projectId = import.meta.env.VITE_FB_PROJECT_ID;
+const SUMMARIZE_URLS = [
+  import.meta.env.VITE_SUMMARIZE_URL,
+  "/api/summarize",
+  projectId ? `https://us-central1-${projectId}.cloudfunctions.net/summarize` : null,
+].filter(Boolean);
+
+async function requestSummarize(url, token, content) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    throw new Error(`API ${res.status}`);
+  }
+  return res.json();
+}
 
 async function aiSummarize(text, user) {
   try {
     const token = user ? await user.getIdToken() : null;
-    const res = await fetch(SUMMARIZE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ content: text }),
-    });
-    if (!res.ok) throw new Error("API " + res.status);
-    return await res.json();
+    for (const url of SUMMARIZE_URLS) {
+      try {
+        return await requestSummarize(url, token, text);
+      } catch {
+        // Try the next candidate endpoint.
+      }
+    }
+    throw new Error("No summarize endpoint succeeded");
   } catch {
     return {
       title: "", summary: "AI unavailable — edit manually.",
@@ -229,6 +247,7 @@ export default function App() {
   const [urlInput, setUrlInput] = useState("");
   const [pasteInput, setPasteInput] = useState("");
   const fileRef = useRef(null);
+  const lastPaste = useRef({ text: "", time: 0 });
 
   /* ─── Queue helpers ─── */
   const enqueue = (label) => {
@@ -349,6 +368,9 @@ export default function App() {
       if (tag === "input" || tag === "textarea") return;
       const text = e.clipboardData?.getData("text/plain")?.trim();
       if (!text) return;
+      const now = Date.now();
+      if (text === lastPaste.current.text && now - lastPaste.current.time < 2000) return;
+      lastPaste.current = { text, time: now };
       e.preventDefault();
       setPasteFlash(true);
       setTimeout(() => setPasteFlash(false), 1800);
@@ -660,8 +682,8 @@ export default function App() {
                     cursor:"pointer", transition:"all .2s",
                     boxShadow:isOpen?`0 0 0 3px ${C.accentSoft}`:"0 1px 4px rgba(0,0,0,0.07)",
                   }}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:8}}>
-                      <h4 style={{margin:0,fontSize:13,fontWeight:700,color:C.text,lineHeight:1.4,flex:1}}>{e.title}</h4>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+                      <h4 style={{margin:0,fontSize:13,fontWeight:700,color:C.text,lineHeight:1.4,flex:"1 1 220px",overflowWrap:"anywhere"}}>{e.title}</h4>
                       <span style={pill(`${statusC[e.status]}18`,statusC[e.status])}>
                         <span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}
                       </span>
@@ -680,7 +702,26 @@ export default function App() {
                           <div><span style={{color:C.dim}}>AI Tech: </span><span style={{color:C.text}}>{e.aiTech||"—"}</span></div>
                           <div><span style={{color:C.dim}}>Impact: </span><span style={{color:C.text}}>{e.impact||"—"}</span></div>
                           <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>Use Case: </span><span style={{color:C.text}}>{e.useCase||"—"}</span></div>
-                          {e.url && <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>URL: </span><a href={e.url} target="_blank" rel="noreferrer" onClick={ev=>ev.stopPropagation()} style={{color:C.accent,textDecoration:"none",fontSize:12}}>{e.url.slice(0,55)}…</a></div>}
+                          {e.url && (
+                            <div style={{gridColumn:"1/-1"}}>
+                              <span style={{color:C.dim}}>URL:</span>
+                              <a
+                                href={e.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={ev=>ev.stopPropagation()}
+                                style={{
+                                  color:C.accent,
+                                  textDecoration:"none",
+                                  fontSize:12,
+                                  marginLeft:6,
+                                  overflowWrap:"anywhere",
+                                }}
+                              >
+                                {e.url}
+                              </a>
+                            </div>
+                          )}
                           {e.notes && <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>Notes: </span><span style={{color:C.text}}>{e.notes}</span></div>}
                         </div>
                         {(e.tags||[]).length>0 && (
@@ -688,7 +729,7 @@ export default function App() {
                             {e.tags.map(t=><span key={t} style={{padding:"2px 8px",background:C.bg,color:C.dim,borderRadius:4,fontSize:10}}>#{t}</span>)}
                           </div>
                         )}
-                        <div style={{marginTop:12,display:"flex",gap:6}}>
+                        <div style={{marginTop:12,display:"flex",gap:6,flexWrap:"wrap"}}>
                           <button onClick={ev=>{ev.stopPropagation();setEditing(e);setView("add");}} style={{padding:"5px 12px",background:C.accentSoft,color:C.accent,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Edit</button>
                           <button onClick={ev=>{ev.stopPropagation();cycleStatus(e);}} style={{padding:"5px 12px",background:C.tealSoft,color:C.teal,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Cycle Status</button>
                           <button onClick={ev=>{ev.stopPropagation();removeEntry(e.id);}} style={{padding:"5px 12px",background:C.roseSoft,color:C.rose,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Delete</button>
