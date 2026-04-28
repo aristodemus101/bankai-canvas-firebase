@@ -1,5 +1,5 @@
 // src/App.jsx — BankAI Research Canvas (Firebase + Gemini Edition)
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { db, auth, googleProvider } from "./firebase";
 import {
   collection, addDoc, updateDoc, deleteDoc, doc, query, where,
@@ -39,14 +39,14 @@ const SUMMARIZE_URLS = [
   projectId ? `https://us-central1-${projectId}.cloudfunctions.net/summarize` : null,
 ].filter(Boolean);
 
-async function requestSummarize(url, token, content) {
+async function requestSummarize(url, token, payload) {
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     throw new Error(`API ${res.status}`);
@@ -54,43 +54,64 @@ async function requestSummarize(url, token, content) {
   return res.json();
 }
 
-async function aiSummarize(text, user) {
-  try {
-    const token = user ? await user.getIdToken() : null;
-    for (const url of SUMMARIZE_URLS) {
-      try {
-        return await requestSummarize(url, token, text);
-      } catch {
-        // Try the next candidate endpoint.
-      }
+async function aiRequest(payload, user) {
+  const token = user ? await user.getIdToken() : null;
+  for (const url of SUMMARIZE_URLS) {
+    try {
+      return await requestSummarize(url, token, payload);
+    } catch {
+      // Try the next candidate endpoint.
     }
-    throw new Error("No summarize endpoint succeeded");
+  }
+  throw new Error("No summarize endpoint succeeded");
+}
+
+async function aiSummarize(payload, user) {
+  try {
+    return await aiRequest(payload, user);
   } catch {
     return {
       title: "", summary: "AI unavailable — edit manually.",
       bank_mentioned: "Other / Multiple", category: "Other",
       ai_technology: "Unknown", use_case: "", impact: "Not specified",
+      tags: [], confidence: { overall: 30, category: 30, bank: 30 }, evidence: [],
     };
+  }
+}
+
+async function aiSemanticSearch(textQuery, entries, user) {
+  try {
+    return await aiRequest({ action: "semantic_search", query: textQuery, entries }, user);
+  } catch {
+    return { ids: [], explanation: "Semantic ranking unavailable." };
   }
 }
 
 /* ═══════════════════════════════════════════
    CSV EXPORT
    ═══════════════════════════════════════════ */
-function exportCSV(entries) {
+function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.csv`) {
   const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
-    "Use Case","Summary","Impact / ROI","Status","Tags","Date Added","Notes"];
+    "Use Case","Summary","Impact / ROI","Status","Tags","Confidence","Evidence","Date Added","Notes"];
   const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = entries.map((e, i) => [
     i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
     e.useCase, e.summary, e.impact, e.status, (e.tags||[]).join("; "),
-    e.dateAdded, e.notes,
+    e.confidence?.overall ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
   ].map(esc).join(","));
   const blob = new Blob(["\uFEFF" + [h.map(esc).join(","), ...rows].join("\n")],
     { type: "text/csv;charset=utf-8;" });
   Object.assign(document.createElement("a"), {
     href: URL.createObjectURL(blob),
-    download: `banking_ai_research_${new Date().toISOString().slice(0,10)}.csv`,
+    download: fileName,
+  }).click();
+}
+
+function downloadFile(content, fileName, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  Object.assign(document.createElement("a"), {
+    href: URL.createObjectURL(blob),
+    download: fileName,
   }).click();
 }
 
@@ -243,6 +264,15 @@ export default function App() {
   const [queue, setQueue] = useState([]);
   const [pendingCards, setPendingCards] = useState([]);
   const [successToasts, setSuccessToasts] = useState([]);
+  const [semanticQuery, setSemanticQuery] = useState("");
+  const [semanticIds, setSemanticIds] = useState([]);
+  const [semanticInfo, setSemanticInfo] = useState("");
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportScope, setExportScope] = useState("filtered");
+  const [exportFormat, setExportFormat] = useState("csv");
+  const [connectorUrl, setConnectorUrl] = useState("");
+  const [dedupeModal, setDedupeModal] = useState(null);
   const [pasteFlash, setPasteFlash] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [editing, setEditing] = useState(null);
@@ -250,24 +280,50 @@ export default function App() {
   const [pasteInput, setPasteInput] = useState("");
   const fileRef = useRef(null);
   const lastPaste = useRef({ text: "", time: 0 });
+  const retryStore = useRef({});
 
   /* ─── Queue helpers ─── */
   const enqueue = (label) => {
     const id = Math.random().toString(36).slice(2);
-    setQueue(q => [...q, { id, label }]);
+    setQueue(q => [...q, { id, label, status: "running" }]);
     return id;
   };
   const dequeue = (id) => setQueue(q => q.filter(x => x.id !== id));
-
-  const pushPendingCard = (id, title, sourceType) => {
-    setPendingCards(cards => [{ id, title, sourceType, status: "analyzing" }, ...cards]);
+  const setQueueStatus = (id, status, error = "") => {
+    setQueue(q => q.map(item => (item.id === id ? { ...item, status, error } : item)));
   };
 
-  const finishPendingCard = (id, status) => {
-    setPendingCards(cards => cards.map(c => (c.id === id ? { ...c, status } : c)));
-    setTimeout(() => {
-      setPendingCards(cards => cards.filter(c => c.id !== id));
-    }, status === "done" ? 1400 : 2600);
+  const normalizeUrl = (url) => String(url || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/$/, "");
+
+  const findExistingByUrl = (url) => {
+    const norm = normalizeUrl(url);
+    return entries.find(e => e.url && normalizeUrl(e.url) === norm);
+  };
+
+  const pushPendingCard = (id, title, sourceType) => {
+    setPendingCards(cards => [{ id, title, sourceType, status: "analyzing", error: "" }, ...cards]);
+  };
+
+  const finishPendingCard = (id, status, error = "") => {
+    setPendingCards(cards => cards.map(c => (c.id === id ? { ...c, status, error } : c)));
+    if (status === "done") {
+      setTimeout(() => {
+        setPendingCards(cards => cards.filter(c => c.id !== id));
+      }, 1400);
+    }
+  };
+
+  const retryPendingCard = async (id) => {
+    const meta = retryStore.current[id];
+    if (!meta) return;
+    finishPendingCard(id, "analyzing", "");
+    setQueueStatus(id, "running", "");
+    await meta.retry();
   };
 
   const pushSuccessToast = (text) => {
@@ -276,14 +332,6 @@ export default function App() {
     setTimeout(() => {
       setSuccessToasts(t => t.filter(x => x.id !== id));
     }, 2600);
-  };
-
-  const goHomeView = () => {
-    setView("canvas");
-    setSearch("");
-    setFCat("All");
-    setFBank("All");
-    setFStatus("All");
   };
 
   /* ─── Auth listener ─── */
@@ -332,62 +380,136 @@ export default function App() {
       .some(f => (f||"").toLowerCase().includes(q));
   });
 
+  const semanticFiltered = semanticIds.length
+    ? filtered
+      .filter(e => semanticIds.includes(e.id))
+      .sort((a, b) => semanticIds.indexOf(a.id) - semanticIds.indexOf(b.id))
+    : filtered;
+
   /* ─── Ingest helpers ─── */
   const baseEntry = (ov) => ({
     title:"", sourceType:"Text", url:"", bank:"Other / Multiple",
     category:"Other", aiTech:"", useCase:"", summary:"", impact:"Not specified",
     status:"To Review", tags:[], dateAdded:new Date().toISOString().slice(0,10),
-    notes:"", ...ov,
+    notes:"", confidence:{ overall: 0, category: 0, bank: 0 }, evidence:[], extractedSnapshot:null,
+    ...ov,
   });
 
+  const buildAiEntry = (ai, overrides = {}) => baseEntry({
+    title: ai.title || overrides.title || "Untitled",
+    sourceType: overrides.sourceType || "Text",
+    url: overrides.url || "",
+    bank: ai.bank_mentioned || "Other / Multiple",
+    category: ai.category || "Other",
+    aiTech: ai.ai_technology || "Unknown",
+    useCase: ai.use_case || "",
+    summary: ai.summary || "AI unavailable — edit manually.",
+    impact: ai.impact || "Not specified",
+    tags: Array.isArray(ai.tags) ? ai.tags.slice(0, 10) : [],
+    confidence: ai.confidence || { overall: 35, category: 35, bank: 35 },
+    evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : [],
+    extractedSnapshot: ai.extracted || null,
+    ...overrides,
+  });
+
+  const mergeEntryFromAi = async (existing, ai) => {
+    const mergedTags = [...new Set([...(existing.tags || []), ...(ai.tags || [])])].slice(0, 12);
+    await updateEntry(existing.id, {
+      summary: ai.summary || existing.summary,
+      bank: ai.bank_mentioned || existing.bank,
+      category: ai.category || existing.category,
+      aiTech: ai.ai_technology || existing.aiTech,
+      useCase: ai.use_case || existing.useCase,
+      impact: ai.impact || existing.impact,
+      evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : (existing.evidence || []),
+      confidence: ai.confidence || existing.confidence,
+      tags: mergedTags,
+      extractedSnapshot: ai.extracted || existing.extractedSnapshot || null,
+      notes: existing.notes
+        ? `${existing.notes}\n\nMerged duplicate URL on ${new Date().toISOString().slice(0, 10)}`
+        : `Merged duplicate URL on ${new Date().toISOString().slice(0, 10)}`,
+    });
+  };
+
+  const runIngestJob = async ({ id, label, sourceType, payloadBuilder, onComplete }) => {
+    setPendingCards(cards => {
+      const exists = cards.some(c => c.id === id);
+      if (exists) {
+        return cards.map(c => (c.id === id ? { ...c, status: "analyzing", error: "" } : c));
+      }
+      return [{ id, title: label, sourceType, status: "analyzing", error: "" }, ...cards];
+    });
+    retryStore.current[id] = {
+      retry: async () => {
+        await runIngestJob({ id, label, sourceType, payloadBuilder, onComplete });
+      },
+    };
+    try {
+      const ai = await aiSummarize(payloadBuilder(), user);
+      await onComplete(ai);
+      finishPendingCard(id, "done");
+      setQueueStatus(id, "done", "");
+    } catch (err) {
+      const msg = err?.message || "Processing failed";
+      finishPendingCard(id, "error", msg);
+      setQueueStatus(id, "error", msg);
+      return;
+    }
+    dequeue(id);
+    delete retryStore.current[id];
+  };
+
   const ingestUrl = async (url) => {
-    goHomeView();
     const label = url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 50);
     const id = enqueue(label);
-    pushPendingCard(id, label, "URL");
-    try {
-      const ai = await aiSummarize(`Analyze this URL about AI use cases in banking: ${url}`, user);
-      const entry = baseEntry({
-        title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
-        sourceType: "URL", url, bank: ai.bank_mentioned, category: ai.category,
-        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-      });
-      await addEntry(entry);
-      finishPendingCard(id, "done");
-      pushSuccessToast(`Added to canvas: ${entry.title}`);
-    } catch {
-      finishPendingCard(id, "error");
-    } finally {
-      dequeue(id);
+    const existing = findExistingByUrl(url);
+    if (existing) {
+      setDedupeModal({ id, url, existing, label });
+      return;
     }
+
+    await runIngestJob({
+      id,
+      label,
+      sourceType: "URL",
+      payloadBuilder: () => ({
+        action: "analyze",
+        url,
+        content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
+      }),
+      onComplete: async (ai) => {
+        const entry = buildAiEntry(ai, {
+          title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
+          sourceType: "URL",
+          url,
+        });
+        await addEntry(entry);
+        pushSuccessToast(`Added to canvas: ${entry.title}`);
+      },
+    });
   };
 
   const ingestText = async (text) => {
-    goHomeView();
     const label = text.slice(0, 50).replace(/\n/g, " ") + "…";
     const id = enqueue(label);
-    pushPendingCard(id, label, "Text");
-    try {
-      const ai = await aiSummarize(text, user);
-      const entry = baseEntry({
-        title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
-        sourceType: "Text", bank: ai.bank_mentioned, category: ai.category,
-        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-      });
-      await addEntry(entry);
-      finishPendingCard(id, "done");
-      pushSuccessToast(`Added to canvas: ${entry.title}`);
-    } catch {
-      finishPendingCard(id, "error");
-    } finally {
-      dequeue(id);
-    }
+    await runIngestJob({
+      id,
+      label,
+      sourceType: "Text",
+      payloadBuilder: () => ({ action: "analyze", content: text }),
+      onComplete: async (ai) => {
+        const entry = buildAiEntry(ai, {
+          title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
+          sourceType: "Text",
+        });
+        await addEntry(entry);
+        pushSuccessToast(`Added to canvas: ${entry.title}`);
+      },
+    });
   };
 
   const ingestFile = async (file) => {
-    goHomeView();
     const id = enqueue(file.name.slice(0, 50));
-    pushPendingCard(id, file.name, "File");
     let sType = "File";
     if (file.type.includes("pdf")) sType = "PDF";
     else if (file.type.startsWith("image")) sType = "Image";
@@ -396,20 +518,17 @@ export default function App() {
     if (file.type.startsWith("text") || file.name.match(/\.(csv|txt|md|json)$/i)) {
       text += "\n" + (await file.text()).slice(0, 4000);
     }
-    try {
-      const ai = await aiSummarize(text, user);
-      const entry = baseEntry({
-        title: file.name, sourceType: sType, bank: ai.bank_mentioned, category: ai.category,
-        aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
-      });
-      await addEntry(entry);
-      finishPendingCard(id, "done");
-      pushSuccessToast(`Added to canvas: ${entry.title}`);
-    } catch {
-      finishPendingCard(id, "error");
-    } finally {
-      dequeue(id);
-    }
+    await runIngestJob({
+      id,
+      label: file.name.slice(0, 50),
+      sourceType: sType,
+      payloadBuilder: () => ({ action: "analyze", content: text }),
+      onComplete: async (ai) => {
+        const entry = buildAiEntry(ai, { title: file.name, sourceType: sType });
+        await addEntry(entry);
+        pushSuccessToast(`Added to canvas: ${entry.title}`);
+      },
+    });
   };
 
   const onDrop = (e) => {
@@ -425,8 +544,23 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
     const handler = (e) => {
+      if (view !== "canvas") return;
       const tag = document.activeElement?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea") return;
+
+      const items = Array.from(e.clipboardData?.items || []);
+      const imageItem = items.find(i => i.type?.startsWith("image/"));
+      if (imageItem) {
+        const file = imageItem.getAsFile();
+        if (file) {
+          e.preventDefault();
+          setPasteFlash(true);
+          setTimeout(() => setPasteFlash(false), 1800);
+          ingestFile(file);
+          return;
+        }
+      }
+
       const text = e.clipboardData?.getData("text/plain")?.trim();
       if (!text) return;
       const now = Date.now();
@@ -440,11 +574,157 @@ export default function App() {
     };
     document.addEventListener("paste", handler);
     return () => document.removeEventListener("paste", handler);
-  }, [user]);
+  }, [user, view]);
 
   const cycleStatus = async (entry) => {
     const next = STATUS_OPTIONS[(STATUS_OPTIONS.indexOf(entry.status)+1)%STATUS_OPTIONS.length];
     await updateEntry(entry.id, { status: next });
+  };
+
+  const clearSemantic = () => {
+    setSemanticIds([]);
+    setSemanticInfo("");
+  };
+
+  const runSemantic = async () => {
+    if (!semanticQuery.trim()) return;
+    setSemanticLoading(true);
+    const ranked = await aiSemanticSearch(
+      semanticQuery.trim(),
+      filtered.map(e => ({
+        id: e.id,
+        title: e.title,
+        summary: e.summary,
+        useCase: e.useCase,
+        bank: e.bank,
+        category: e.category,
+        tags: e.tags || [],
+      })),
+      user
+    );
+    setSemanticIds(Array.isArray(ranked.ids) ? ranked.ids : []);
+    setSemanticInfo(ranked.explanation || "Semantic ranking applied.");
+    setSemanticLoading(false);
+  };
+
+  const exportTarget = exportScope === "all" ? entries : semanticFiltered;
+
+  const exportAsJson = () => {
+    downloadFile(
+      JSON.stringify(exportTarget, null, 2),
+      `banking_ai_research_${new Date().toISOString().slice(0,10)}.json`,
+      "application/json"
+    );
+  };
+
+  const exportAsMarkdown = () => {
+    const body = exportTarget.map((e, idx) => [
+      `## ${idx + 1}. ${e.title || "Untitled"}`,
+      `- Source: ${e.sourceType}`,
+      `- Bank: ${e.bank}`,
+      `- Category: ${e.category}`,
+      `- AI Tech: ${e.aiTech || "Unknown"}`,
+      `- Impact: ${e.impact || "Not specified"}`,
+      `- Tags: ${(e.tags || []).join(", ")}`,
+      "",
+      `${e.summary || ""}`,
+      "",
+    ].join("\n")).join("\n");
+    downloadFile(
+      body,
+      `banking_ai_research_${new Date().toISOString().slice(0,10)}.md`,
+      "text/markdown;charset=utf-8"
+    );
+  };
+
+  const sendToConnector = async () => {
+    if (!connectorUrl.trim()) return;
+    try {
+      await fetch(connectorUrl.trim(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          exportedAt: new Date().toISOString(),
+          count: exportTarget.length,
+          entries: exportTarget,
+        }),
+      });
+      pushSuccessToast("Connector export sent");
+    } catch {
+      pushSuccessToast("Connector export failed");
+    }
+  };
+
+  const doExport = async () => {
+    if (exportFormat === "csv") {
+      exportCSV(exportTarget);
+    } else if (exportFormat === "json") {
+      exportAsJson();
+    } else if (exportFormat === "markdown") {
+      exportAsMarkdown();
+    } else if (exportFormat === "connector") {
+      await sendToConnector();
+    }
+    if (exportFormat !== "connector") {
+      pushSuccessToast(`Exported ${exportTarget.length} item${exportTarget.length!==1?"s":""}`);
+    }
+    setExportOpen(false);
+  };
+
+  const applyDedupeChoice = async (choice) => {
+    const modal = dedupeModal;
+    if (!modal) return;
+    setDedupeModal(null);
+
+    const { id, label, url, existing } = modal;
+    if (choice === "cancel") {
+      dequeue(id);
+      return;
+    }
+
+    await runIngestJob({
+      id,
+      label,
+      sourceType: "URL",
+      payloadBuilder: () => ({
+        action: "analyze",
+        url,
+        content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
+      }),
+      onComplete: async (ai) => {
+        if (choice === "merge") {
+          await mergeEntryFromAi(existing, ai);
+          pushSuccessToast(`Merged into existing card: ${existing.title}`);
+          return;
+        }
+        if (choice === "update") {
+          await updateEntry(existing.id, {
+            title: ai.title || existing.title,
+            summary: ai.summary || existing.summary,
+            bank: ai.bank_mentioned || existing.bank,
+            category: ai.category || existing.category,
+            aiTech: ai.ai_technology || existing.aiTech,
+            useCase: ai.use_case || existing.useCase,
+            impact: ai.impact || existing.impact,
+            tags: Array.isArray(ai.tags) ? ai.tags.slice(0, 10) : existing.tags,
+            confidence: ai.confidence || existing.confidence,
+            evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : existing.evidence,
+            extractedSnapshot: ai.extracted || existing.extractedSnapshot || null,
+          });
+          pushSuccessToast(`Updated existing card: ${existing.title}`);
+          return;
+        }
+
+        const entry = buildAiEntry(ai, {
+          title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
+          sourceType: "URL",
+          url,
+          notes: `Duplicate of ${existing.id}`,
+        });
+        await addEntry(entry);
+        pushSuccessToast(`Added duplicate as new card: ${entry.title}`);
+      },
+    });
   };
 
   /* ═══════════════════════════════════════════
@@ -486,9 +766,25 @@ export default function App() {
           <h3 style={{ margin:"0 0 14px", fontSize:14, fontWeight:700, color:C.teal }}>⚡ Quick Add</h3>
           <div style={{ display:"flex", gap:8, marginBottom:12 }}>
             <input value={urlInput} onChange={e=>setUrlInput(e.target.value)} placeholder="Paste a URL…"
-              style={{...inputS, flex:1}} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border} />
-            <button onClick={()=>{if(urlInput.trim()){ingestUrl(urlInput.trim());setUrlInput("");}}}
+              style={{...inputS, flex:1}} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border}
+              onKeyDown={e=>{
+                if (e.key !== "Enter") return;
+                const urls = Array.from(new Set((urlInput.match(/https?:\/\/[^\s,]+/g) || []).map(u => u.trim())));
+                if (!urls.length) return;
+                urls.forEach(ingestUrl);
+                setUrlInput("");
+              }} />
+            <button onClick={()=>{
+              const urls = Array.from(new Set((urlInput.match(/https?:\/\/[^\s,]+/g) || []).map(u => u.trim())));
+              if (!urls.length && urlInput.trim().match(/^https?:\/\//)) urls.push(urlInput.trim());
+              if (!urls.length) return;
+              urls.forEach(ingestUrl);
+              setUrlInput("");
+            }}
               style={{...btnP, whiteSpace:"nowrap"}}>Add URL</button>
+          </div>
+          <div style={{ fontSize:11, color:C.dim, marginTop:-4, marginBottom:10 }}>
+            Add one or many URLs at once (space/newline separated). You stay on this screen while items process.
           </div>
           <textarea value={pasteInput} onChange={e=>setPasteInput(e.target.value)} rows={3}
             placeholder="Or paste article text, research snippets, notes…"
@@ -587,25 +883,94 @@ export default function App() {
         </div>
       )}
 
+      {dedupeModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.4)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div style={{width:"100%",maxWidth:540,background:C.panel,border:`1px solid ${C.border}`,borderRadius:14,padding:18,boxShadow:"0 18px 48px rgba(2,6,23,0.2)"}}>
+            <h3 style={{margin:"0 0 8px",fontSize:16,color:C.text}}>Duplicate URL Detected</h3>
+            <p style={{margin:"0 0 12px",fontSize:12,color:C.muted,lineHeight:1.5}}>
+              This URL already exists as <strong>{dedupeModal.existing.title}</strong>. Choose how to handle this source.
+            </p>
+            <div style={{display:"grid",gap:8,marginBottom:12}}>
+              <button onClick={()=>applyDedupeChoice("merge")} style={{...btnP,justifySelf:"start"}}>Merge Insights Into Existing</button>
+              <button onClick={()=>applyDedupeChoice("update")} style={{...btnP,justifySelf:"start",background:C.teal}}>Replace Existing AI Analysis</button>
+              <button onClick={()=>applyDedupeChoice("new")} style={{...btnP,justifySelf:"start",background:C.violet}}>Add As New Card Anyway</button>
+            </div>
+            <button onClick={()=>applyDedupeChoice("cancel")} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {exportOpen && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div style={{width:"100%",maxWidth:620,background:C.panel,border:`1px solid ${C.border}`,borderRadius:14,padding:18,boxShadow:"0 20px 50px rgba(2,6,23,0.2)"}}>
+            <h3 style={{margin:"0 0 12px",fontSize:16,color:C.text}}>Export Center</h3>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+              <div>
+                <label style={labelS}>Scope</label>
+                <select value={exportScope} onChange={e=>setExportScope(e.target.value)} style={{...inputS,cursor:"pointer"}}>
+                  <option value="filtered">Filtered / Current View</option>
+                  <option value="all">All Entries</option>
+                </select>
+              </div>
+              <div>
+                <label style={labelS}>Format</label>
+                <select value={exportFormat} onChange={e=>setExportFormat(e.target.value)} style={{...inputS,cursor:"pointer"}}>
+                  <option value="csv">CSV (optional download)</option>
+                  <option value="json">JSON</option>
+                  <option value="markdown">Markdown Brief</option>
+                  <option value="connector">Connector Webhook</option>
+                </select>
+              </div>
+            </div>
+            {exportFormat === "connector" && (
+              <div style={{marginBottom:12}}>
+                <label style={labelS}>Connector Endpoint URL</label>
+                <input value={connectorUrl} onChange={e=>setConnectorUrl(e.target.value)} placeholder="https://hooks.slack.com/..." style={inputS} />
+              </div>
+            )}
+            <div style={{fontSize:12,color:C.dim,marginBottom:14}}>
+              {exportScope === "all" ? `Exporting all ${entries.length} entries.` : `Exporting current subset (${semanticFiltered.length} entries).`}
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button onClick={doExport} style={btnP}>Run Export</button>
+              <button onClick={()=>setExportOpen(false)} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Queue panel */}
       {queue.length > 0 && (
         <div style={{
           position:"fixed", bottom:24, right:24, zIndex:1000,
           background:C.panel, border:`1px solid ${C.border}`,
-          borderRadius:14, padding:"14px 16px", minWidth:240, maxWidth:300,
+          borderRadius:14, padding:"14px 16px", minWidth:260, maxWidth:340,
           boxShadow:"0 8px 32px rgba(0,0,0,0.12)", animation:"fadein .2s ease",
         }}>
           <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:10,textTransform:"uppercase",letterSpacing:".6px"}}>
-            🧠 Analyzing {queue.length} item{queue.length>1?"s":""}
+            Queue · {queue.filter(q => q.status === "running").length} running · {queue.filter(q => q.status === "error").length} failed
           </div>
           {queue.map(item => (
             <div key={item.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderTop:`1px solid ${C.border}`}}>
-              <div style={{
-                width:14,height:14,borderRadius:"50%",flexShrink:0,
-                border:`2px solid ${C.accent}`,borderTopColor:"transparent",
-                animation:"spin .8s linear infinite",
-              }}/>
-              <span style={{fontSize:12,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.label}</span>
+              {item.status === "running" ? (
+                <div style={{
+                  width:14,height:14,borderRadius:"50%",flexShrink:0,
+                  border:`2px solid ${C.accent}`,borderTopColor:"transparent",
+                  animation:"spin .8s linear infinite",
+                }}/>
+              ) : (
+                <div style={{ width:14, textAlign:"center", color:item.status === "error" ? C.rose : C.teal, fontWeight:800 }}>
+                  {item.status === "error" ? "!" : "✓"}
+                </div>
+              )}
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flex:1,minWidth:0}}>
+                <span style={{fontSize:12,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.label}</span>
+                {item.status === "error" && (
+                  <button onClick={()=>retryPendingCard(item.id)} style={{padding:"2px 8px",fontSize:10,borderRadius:6,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:"pointer",fontWeight:700}}>
+                    Retry
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -635,12 +1000,12 @@ export default function App() {
               cursor:"pointer", fontWeight:700, fontSize:12, fontFamily:"inherit",
             }}>{v.icon} {v.label}</button>
           ))}
-          <button onClick={()=>exportCSV(entries)} disabled={!entries.length} style={{
+          <button onClick={()=>setExportOpen(true)} disabled={!entries.length} style={{
             padding:"7px 16px", borderRadius:7, border:`1px solid ${C.teal}`,
             background:C.tealSoft, color:C.teal,
             cursor:entries.length?"pointer":"not-allowed",
             fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:entries.length?1:.4,
-          }}>↓ CSV</button>
+          }}>↓ Export</button>
           <button onClick={()=>signOut(auth)} style={{
             padding:"7px 14px", borderRadius:7, border:`1px solid ${C.border}`,
             background:"transparent", color:C.dim,
@@ -651,7 +1016,7 @@ export default function App() {
 
       {/* ══════════ SEARCH & FILTERS ══════════ */}
       {view!=="add" && (
-        <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap" }}>
+        <div style={{ display:"flex", gap:8, marginBottom:10, flexWrap:"wrap" }}>
           <div style={{ flex:"1 1 260px", position:"relative" }}>
             <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:C.dim, fontSize:14 }}>⌕</span>
             <input value={search} onChange={e=>setSearch(e.target.value)}
@@ -669,6 +1034,27 @@ export default function App() {
               {f.opts.map(o=><option key={o} value={o}>{o==="All"?`All ${f.label}`:o}</option>)}
             </select>
           ))}
+        </div>
+      )}
+
+      {view!=="add" && (
+        <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap", alignItems:"center" }}>
+          <input
+            value={semanticQuery}
+            onChange={e=>setSemanticQuery(e.target.value)}
+            placeholder="Semantic search: e.g. agentic AI compliance with measurable ROI"
+            style={{...inputS, flex:"1 1 360px"}}
+            onKeyDown={e=>{ if (e.key === "Enter") runSemantic(); }}
+          />
+          <button onClick={runSemantic} disabled={semanticLoading || !semanticQuery.trim()} style={{...btnP, opacity:(semanticLoading || !semanticQuery.trim())?0.6:1}}>
+            {semanticLoading ? "Ranking…" : "Semantic Rank"}
+          </button>
+          {semanticIds.length > 0 && (
+            <button onClick={clearSemantic} style={{...btnP, background:"transparent", color:C.muted, border:`1px solid ${C.border}`}}>
+              Clear Semantic
+            </button>
+          )}
+          {semanticInfo && <div style={{ fontSize:11, color:C.dim }}>{semanticInfo}</div>}
         </div>
       )}
 
@@ -704,7 +1090,7 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((e,i)=>(
+              {semanticFiltered.map((e,i)=>(
                 <tr key={e.id} onClick={()=>{setEditing(e);setView("add");}}
                   style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer", transition:"background .15s" }}
                   onMouseEnter={ev=>ev.currentTarget.style.background=C.card}
@@ -721,7 +1107,7 @@ export default function App() {
                   <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap"}}>{e.dateAdded}</td>
                 </tr>
               ))}
-              {!filtered.length && <tr><td colSpan={10} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
+              {!semanticFiltered.length && <tr><td colSpan={10} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
             </tbody>
           </table>
         </div>
@@ -776,6 +1162,16 @@ export default function App() {
                     <div style={{ fontSize:11, color:card.status==="error"?C.rose:(card.status==="done"?C.teal:C.dim), fontWeight:700 }}>
                       {card.status === "analyzing" ? "Analyzing..." : card.status === "done" ? "Added to canvas" : "Could not add this source"}
                     </div>
+                    {card.status === "error" && (
+                      <div style={{ marginTop:8, display:"flex", gap:6 }}>
+                        <button onClick={()=>retryPendingCard(card.id)} style={{padding:"4px 10px",fontSize:10,borderRadius:6,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:"pointer",fontWeight:700}}>
+                          Retry
+                        </button>
+                        <button onClick={()=>{setPendingCards(x=>x.filter(p=>p.id!==card.id));dequeue(card.id);delete retryStore.current[card.id];}} style={{padding:"4px 10px",fontSize:10,borderRadius:6,border:`1px solid ${C.border}`,background:"transparent",color:C.muted,cursor:"pointer",fontWeight:700}}>
+                          Dismiss
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -783,9 +1179,9 @@ export default function App() {
           )}
 
           {/* Cards */}
-          {filtered.length > 0 ? (
+          {semanticFiltered.length > 0 ? (
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))", gap:14 }}>
-              {filtered.map(e => {
+              {semanticFiltered.map(e => {
                 const isOpen = expanded === e.id;
                 return (
                   <div key={e.id} onClick={()=>setExpanded(isOpen?null:e.id)} style={{
@@ -804,6 +1200,9 @@ export default function App() {
                       <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span>
                       <span style={pill(C.tealSoft,C.teal)}>{e.bank}</span>
                       <span style={pill(C.violetSoft,C.violet)}>{e.category}</span>
+                      {typeof e.confidence?.overall === "number" && (
+                        <span style={pill(C.amberSoft,C.amber)}>Confidence {e.confidence.overall}%</span>
+                      )}
                     </div>
                     <p style={{margin:0,fontSize:12,color:C.muted,lineHeight:1.55}}>
                       {e.summary?.slice(0,isOpen?9999:110)}{!isOpen&&(e.summary||"").length>110?"…":""}
@@ -835,6 +1234,16 @@ export default function App() {
                             </div>
                           )}
                           {e.notes && <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>Notes: </span><span style={{color:C.text}}>{e.notes}</span></div>}
+                          {(e.evidence||[]).length > 0 && (
+                            <div style={{gridColumn:"1/-1"}}>
+                              <span style={{color:C.dim}}>Evidence:</span>
+                              <ul style={{margin:"6px 0 0", paddingLeft:16, color:C.text}}>
+                                {(e.evidence || []).map((ev, idx) => (
+                                  <li key={idx} style={{marginBottom:3, fontSize:12}}>{ev}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
                         </div>
                         {(e.tags||[]).length>0 && (
                           <div style={{marginTop:10,display:"flex",gap:4,flexWrap:"wrap"}}>
