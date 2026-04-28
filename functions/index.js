@@ -3,14 +3,33 @@
 
 const { onRequest } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
+const { initializeApp } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+
+initializeApp();
 
 const geminiKey = defineSecret("GEMINI_API_KEY");
+const ALLOWED_EMAIL = "divyaanshmehta513@gmail.com"; // model: gemini-2.0-flash-lite
 
 exports.summarize = onRequest(
-  { cors: true, secrets: [geminiKey] },
+  { cors: true, secrets: [geminiKey], invoker: "public" },
   async (req, res) => {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    // Verify Firebase ID token
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+      const decoded = await getAuth().verifyIdToken(token);
+      if (decoded.email !== ALLOWED_EMAIL) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    } catch {
+      return res.status(401).json({ error: "Invalid token" });
     }
 
     const { content } = req.body;
@@ -42,7 +61,7 @@ ${content.slice(0, 4000)}`;
 
     try {
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${key}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

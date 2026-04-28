@@ -5,7 +5,10 @@ import {
   collection, addDoc, updateDoc, deleteDoc, doc, query, where,
   orderBy, onSnapshot, serverTimestamp,
 } from "firebase/firestore";
-import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import {
+  signInWithPopup, signOut, onAuthStateChanged,
+  createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail,
+} from "firebase/auth";
 
 /* ═══════════════════════════════════════════
    CONSTANTS
@@ -31,11 +34,15 @@ const COLLECTION = "research_entries";
 // After deploying, replace this URL with your actual function URL
 const SUMMARIZE_URL = import.meta.env.VITE_SUMMARIZE_URL || "/api/summarize";
 
-async function aiSummarize(text) {
+async function aiSummarize(text, user) {
   try {
+    const token = user ? await user.getIdToken() : null;
     const res = await fetch(SUMMARIZE_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({ content: text }),
     });
     if (!res.ok) throw new Error("API " + res.status);
@@ -73,12 +80,12 @@ function exportCSV(entries) {
    PALETTE & STYLES
    ═══════════════════════════════════════════ */
 const C = {
-  bg: "#05080E", panel: "#0C1219", card: "#111921", cardHov: "#162030",
-  border: "#1A2538", borderLit: "#2563EB", accent: "#2563EB",
-  accentSoft: "rgba(37,99,235,0.10)", teal: "#06D6A0", tealSoft: "rgba(6,214,160,0.10)",
-  amber: "#F0A820", amberSoft: "rgba(240,168,32,0.10)", rose: "#EF4444",
-  roseSoft: "rgba(239,68,68,0.10)", violet: "#7C3AED", violetSoft: "rgba(124,58,237,0.10)",
-  text: "#D1DAE6", muted: "#6B7F99", dim: "#3E5068",
+  bg: "#F1F5F9", panel: "#FFFFFF", card: "#FFFFFF", cardHov: "#F8FAFC",
+  border: "#E2E8F0", borderLit: "#2563EB", accent: "#2563EB",
+  accentSoft: "rgba(37,99,235,0.08)", teal: "#0D9488", tealSoft: "rgba(13,148,136,0.08)",
+  amber: "#D97706", amberSoft: "rgba(217,119,6,0.08)", rose: "#DC2626",
+  roseSoft: "rgba(220,38,38,0.08)", violet: "#7C3AED", violetSoft: "rgba(124,58,237,0.08)",
+  text: "#0F172A", muted: "#475569", dim: "#94A3B8",
 };
 const statusC = { "To Review": C.amber, Reviewed: C.teal, "Key Finding": C.violet, Archived: C.dim };
 const srcIcon = { URL:"🔗", PDF:"📄", Image:"🖼", "Excel/CSV":"📊", Text:"✏️", File:"📁",
@@ -89,7 +96,7 @@ const pill = (bg, fg) => ({
   background:bg, color:fg, borderRadius:20, fontSize:11, fontWeight:600, whiteSpace:"nowrap",
 });
 const inputS = {
-  width:"100%", padding:"10px 14px", background:C.bg, border:`1px solid ${C.border}`,
+  width:"100%", padding:"10px 14px", background:"#FFFFFF", border:`1px solid ${C.border}`,
   borderRadius:8, color:C.text, fontSize:14, outline:"none", fontFamily:"inherit",
   boxSizing:"border-box", transition:"border-color .2s",
 };
@@ -101,6 +108,106 @@ const btnP = {
   padding:"10px 22px", background:C.accent, color:"#fff", border:"none",
   borderRadius:8, cursor:"pointer", fontWeight:700, fontSize:13, fontFamily:"inherit",
 };
+
+/* ═══════════════════════════════════════════
+   AUTH SCREEN
+   ═══════════════════════════════════════════ */
+function AuthScreen() {
+  const [mode, setMode] = useState("login"); // "login" | "signup" | "reset"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handle = async (fn) => {
+    setError(""); setInfo(""); setLoading(true);
+    try { await fn(); } catch (e) { setError(e.message.replace("Firebase: ", "").replace(/ \(auth\/.*\)/, "")); }
+    setLoading(false);
+  };
+
+  const submit = () => {
+    if (mode === "signup") handle(() => createUserWithEmailAndPassword(auth, email, password));
+    else handle(() => signInWithEmailAndPassword(auth, email, password));
+  };
+
+  const resetPw = () => handle(async () => {
+    await sendPasswordResetEmail(auth, email);
+    setInfo("Reset email sent — check your inbox.");
+    setMode("login");
+  });
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:"'Manrope',sans-serif", padding:20 }}>
+      <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
+      <div style={{ width:"100%", maxWidth:380, background:C.panel, borderRadius:16, border:`1px solid ${C.border}`, padding:36 }}>
+        <div style={{ textAlign:"center", marginBottom:28 }}>
+          <div style={{ fontSize:40, marginBottom:10 }}>◆</div>
+          <h1 style={{ margin:"0 0 6px", fontSize:22, fontFamily:"'JetBrains Mono',monospace", fontWeight:700, color:C.teal, letterSpacing:"-0.5px" }}>BankAI Canvas</h1>
+          <p style={{ margin:0, fontSize:12, color:C.dim }}>
+            {mode === "signup" ? "Create an account" : mode === "reset" ? "Reset your password" : "Sign in to your account"}
+          </p>
+        </div>
+
+        {error && <div style={{ background:C.roseSoft, color:C.rose, borderRadius:8, padding:"10px 14px", fontSize:12, marginBottom:16, border:`1px solid ${C.rose}44` }}>{error}</div>}
+        {info  && <div style={{ background:C.tealSoft, color:C.teal,  borderRadius:8, padding:"10px 14px", fontSize:12, marginBottom:16, border:`1px solid ${C.teal}44` }}>{info}</div>}
+
+        <div style={{ marginBottom:12 }}>
+          <label style={labelS}>Email</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com"
+            style={inputS} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border} />
+        </div>
+
+        {mode !== "reset" && (
+          <div style={{ marginBottom:20 }}>
+            <label style={labelS}>Password</label>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+              placeholder={mode === "signup" ? "Min 6 characters" : "••••••••"}
+              style={inputS} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border}
+              onKeyDown={e=>e.key==="Enter"&&submit()} />
+          </div>
+        )}
+
+        {mode === "reset" ? (
+          <button onClick={resetPw} disabled={loading||!email} style={{ ...btnP, width:"100%", opacity:(loading||!email)?0.5:1, marginBottom:12 }}>
+            {loading ? "Sending…" : "Send Reset Email"}
+          </button>
+        ) : (
+          <button onClick={submit} disabled={loading||!email||!password} style={{ ...btnP, width:"100%", opacity:(loading||!email||!password)?0.5:1, marginBottom:12 }}>
+            {loading ? "…" : mode === "signup" ? "Create Account" : "Sign In"}
+          </button>
+        )}
+
+        <div style={{ textAlign:"center", marginBottom:16 }}>
+          {mode !== "reset" && (
+            <span style={{ fontSize:11, color:C.dim, cursor:"pointer" }} onClick={()=>{setMode(mode==="login"?"signup":"login");setError("");}}>
+              {mode === "login" ? "No account? Sign up" : "Already have an account? Sign in"}
+            </span>
+          )}
+          {mode === "login" && <span style={{ color:C.dim, fontSize:11 }}> · </span>}
+          {mode !== "signup" && (
+            <span style={{ fontSize:11, color:C.dim, cursor:"pointer" }} onClick={()=>{setMode(mode==="reset"?"login":"reset");setError("");}}>
+              {mode === "reset" ? "Back to sign in" : "Forgot password?"}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:16 }}>
+          <div style={{ flex:1, height:1, background:C.border }} />
+          <span style={{ fontSize:11, color:C.dim }}>or</span>
+          <div style={{ flex:1, height:1, background:C.border }} />
+        </div>
+
+        <button onClick={()=>signInWithPopup(auth, googleProvider)} style={{
+          ...btnP, width:"100%", background:"transparent",
+          border:`1px solid ${C.border}`, color:C.text, fontWeight:600,
+        }}>
+          Continue with Google
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /* ═══════════════════════════════════════════
    MAIN APP
@@ -115,13 +222,21 @@ export default function App() {
   const [fBank, setFBank] = useState("All");
   const [fStatus, setFStatus] = useState("All");
   const [isDragOver, setIsDragOver] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [busyMsg, setBusyMsg] = useState("");
+  const [queue, setQueue] = useState([]);
+  const [pasteFlash, setPasteFlash] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [editing, setEditing] = useState(null);
   const [urlInput, setUrlInput] = useState("");
   const [pasteInput, setPasteInput] = useState("");
   const fileRef = useRef(null);
+
+  /* ─── Queue helpers ─── */
+  const enqueue = (label) => {
+    const id = Math.random().toString(36).slice(2);
+    setQueue(q => [...q, { id, label }]);
+    return id;
+  };
+  const dequeue = (id) => setQueue(q => q.filter(x => x.id !== id));
 
   /* ─── Auth listener ─── */
   useEffect(() => {
@@ -178,52 +293,70 @@ export default function App() {
   });
 
   const ingestUrl = async (url) => {
-    setBusy(true); setBusyMsg("Fetching & analyzing URL…");
-    const ai = await aiSummarize(`Analyze this URL about AI use cases in banking: ${url}`);
+    const id = enqueue(url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 50));
+    const ai = await aiSummarize(`Analyze this URL about AI use cases in banking: ${url}`, user);
     await addEntry(baseEntry({
-      title: ai.title || url.replace(/https?:\/\/(www\.)?/,"").slice(0,70),
-      sourceType:"URL", url, bank:ai.bank_mentioned, category:ai.category,
-      aiTech:ai.ai_technology, useCase:ai.use_case, summary:ai.summary, impact:ai.impact,
+      title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
+      sourceType: "URL", url, bank: ai.bank_mentioned, category: ai.category,
+      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
     }));
-    setBusy(false); setBusyMsg("");
+    dequeue(id);
   };
 
   const ingestText = async (text) => {
-    setBusy(true); setBusyMsg("Analyzing pasted content…");
-    const ai = await aiSummarize(text);
+    const id = enqueue(text.slice(0, 50).replace(/\n/g, " ") + "…");
+    const ai = await aiSummarize(text, user);
     await addEntry(baseEntry({
-      title: ai.title || text.slice(0,65).replace(/\n/g," ")+"…",
-      sourceType:"Text", bank:ai.bank_mentioned, category:ai.category,
-      aiTech:ai.ai_technology, useCase:ai.use_case, summary:ai.summary, impact:ai.impact,
+      title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
+      sourceType: "Text", bank: ai.bank_mentioned, category: ai.category,
+      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
     }));
-    setBusy(false); setBusyMsg("");
+    dequeue(id);
   };
 
   const ingestFile = async (file) => {
-    setBusy(true); setBusyMsg(`Processing ${file.name}…`);
+    const id = enqueue(file.name.slice(0, 50));
     let sType = "File";
     if (file.type.includes("pdf")) sType = "PDF";
     else if (file.type.startsWith("image")) sType = "Image";
     else if (file.name.match(/\.(xlsx|xls|csv)$/i)) sType = "Excel/CSV";
-    let text = `File: ${file.name} (${sType}, ${(file.size/1024).toFixed(1)} KB)`;
+    let text = `File: ${file.name} (${sType}, ${(file.size / 1024).toFixed(1)} KB)`;
     if (file.type.startsWith("text") || file.name.match(/\.(csv|txt|md|json)$/i)) {
       text += "\n" + (await file.text()).slice(0, 4000);
     }
-    const ai = await aiSummarize(text);
+    const ai = await aiSummarize(text, user);
     await addEntry(baseEntry({
-      title: file.name, sourceType:sType, bank:ai.bank_mentioned, category:ai.category,
-      aiTech:ai.ai_technology, useCase:ai.use_case, summary:ai.summary, impact:ai.impact,
+      title: file.name, sourceType: sType, bank: ai.bank_mentioned, category: ai.category,
+      aiTech: ai.ai_technology, useCase: ai.use_case, summary: ai.summary, impact: ai.impact,
     }));
-    setBusy(false); setBusyMsg("");
+    dequeue(id);
   };
 
-  const onDrop = useCallback(async (e) => {
+  const onDrop = (e) => {
     e.preventDefault(); setIsDragOver(false);
     const files = Array.from(e.dataTransfer.files);
     const text = e.dataTransfer.getData("text/plain");
-    if (files.length) for (const f of files) await ingestFile(f);
-    else if (text?.match(/^https?:\/\//)) await ingestUrl(text);
-    else if (text) await ingestText(text);
+    if (files.length) files.forEach(f => ingestFile(f));
+    else if (text?.match(/^https?:\/\//)) ingestUrl(text);
+    else if (text) ingestText(text);
+  };
+
+  /* ─── Global paste (⌘V anywhere) ─── */
+  useEffect(() => {
+    if (!user) return;
+    const handler = (e) => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      const text = e.clipboardData?.getData("text/plain")?.trim();
+      if (!text) return;
+      e.preventDefault();
+      setPasteFlash(true);
+      setTimeout(() => setPasteFlash(false), 1800);
+      if (text.match(/^https?:\/\//)) ingestUrl(text);
+      else ingestText(text);
+    };
+    document.addEventListener("paste", handler);
+    return () => document.removeEventListener("paste", handler);
   }, [user]);
 
   const cycleStatus = async (entry) => {
@@ -244,33 +377,7 @@ export default function App() {
   }
 
   if (!user) {
-    return (
-      <div style={{
-        minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center",
-        fontFamily:"'Manrope',sans-serif",
-      }}>
-        <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
-        <div style={{ textAlign:"center", padding:40 }}>
-          <div style={{ fontSize:56, marginBottom:16 }}>◆</div>
-          <h1 style={{
-            fontSize:28, fontFamily:"'JetBrains Mono',monospace", fontWeight:700,
-            color:C.teal, margin:"0 0 8px", letterSpacing:"-0.5px",
-          }}>BankAI Canvas</h1>
-          <p style={{ color:C.muted, fontSize:14, margin:"0 0 28px", maxWidth:380, lineHeight:1.6 }}>
-            Collect, categorize, and export AI use cases in banking.
-            Sign in to sync your research across devices.
-          </p>
-          <button onClick={() => signInWithPopup(auth, googleProvider)} style={{
-            ...btnP, padding:"14px 36px", fontSize:15, borderRadius:10,
-            background:`linear-gradient(135deg, ${C.accent}, ${C.teal})`,
-            boxShadow:`0 4px 24px ${C.accentSoft}`,
-          }}>
-            Sign in with Google
-          </button>
-          <p style={{ color:C.dim, fontSize:11, marginTop:16 }}>Your data is private — only you can see your entries</p>
-        </div>
-      </div>
-    );
+    return <AuthScreen />;
   }
 
   /* ═══════════════════════════════════════════
@@ -297,15 +404,15 @@ export default function App() {
           <div style={{ display:"flex", gap:8, marginBottom:12 }}>
             <input value={urlInput} onChange={e=>setUrlInput(e.target.value)} placeholder="Paste a URL…"
               style={{...inputS, flex:1}} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border} />
-            <button onClick={async()=>{if(urlInput.trim()){await ingestUrl(urlInput.trim());setUrlInput("");setView("canvas");}}}
-              disabled={busy} style={{...btnP, opacity:busy?.5:1, whiteSpace:"nowrap"}}>{busy?"…":"Add URL"}</button>
+            <button onClick={()=>{if(urlInput.trim()){ingestUrl(urlInput.trim());setUrlInput("");}}}
+              style={{...btnP, whiteSpace:"nowrap"}}>Add URL</button>
           </div>
           <textarea value={pasteInput} onChange={e=>setPasteInput(e.target.value)} rows={3}
             placeholder="Or paste article text, research snippets, notes…"
             style={{...inputS, resize:"vertical"}} onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border} />
-          <button onClick={async()=>{if(pasteInput.trim()){await ingestText(pasteInput.trim());setPasteInput("");setView("canvas");}}}
-            disabled={busy||!pasteInput.trim()} style={{...btnP, marginTop:10, opacity:(busy||!pasteInput.trim())?.4:1}}>
-            {busy?"Analyzing…":"Analyze & Add"}
+          <button onClick={()=>{if(pasteInput.trim()){ingestText(pasteInput.trim());setPasteInput("");}}}
+            disabled={!pasteInput.trim()} style={{...btnP, marginTop:10, opacity:!pasteInput.trim()?.4:1}}>
+            Analyze & Add
           </button>
         </div>
         {/* Manual form */}
@@ -356,15 +463,45 @@ export default function App() {
     <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'Manrope','SF Pro Display',system-ui,sans-serif", padding:"0 20px 48px" }}>
       <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
 
-      {/* Busy bar */}
-      {busy && (
+      <style>{`
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+      `}</style>
+
+      {/* Paste flash toast */}
+      {pasteFlash && (
         <div style={{
-          position:"fixed",top:0,left:0,right:0,zIndex:999,padding:"10px 0",
-          background:`linear-gradient(90deg,${C.accent},${C.teal})`,textAlign:"center",
-          fontSize:13,fontWeight:700,color:"#fff",animation:"bp 1.4s ease-in-out infinite",
+          position:"fixed", top:20, left:"50%", transform:"translateX(-50%)",
+          zIndex:1001, background:C.teal, color:"#fff",
+          padding:"9px 22px", borderRadius:24, fontSize:13, fontWeight:700,
+          boxShadow:"0 4px 20px rgba(0,0,0,0.15)", animation:"fadein .2s ease",
+          pointerEvents:"none",
         }}>
-          <style>{`@keyframes bp{0%,100%{opacity:1}50%{opacity:.65}}`}</style>
-          🧠 {busyMsg}
+          ⌘V detected — analyzing…
+        </div>
+      )}
+
+      {/* Queue panel */}
+      {queue.length > 0 && (
+        <div style={{
+          position:"fixed", bottom:24, right:24, zIndex:1000,
+          background:C.panel, border:`1px solid ${C.border}`,
+          borderRadius:14, padding:"14px 16px", minWidth:240, maxWidth:300,
+          boxShadow:"0 8px 32px rgba(0,0,0,0.12)", animation:"fadein .2s ease",
+        }}>
+          <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:10,textTransform:"uppercase",letterSpacing:".6px"}}>
+            🧠 Analyzing {queue.length} item{queue.length>1?"s":""}
+          </div>
+          {queue.map(item => (
+            <div key={item.id} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderTop:`1px solid ${C.border}`}}>
+              <div style={{
+                width:14,height:14,borderRadius:"50%",flexShrink:0,
+                border:`2px solid ${C.accent}`,borderTopColor:"transparent",
+                animation:"spin .8s linear infinite",
+              }}/>
+              <span style={{fontSize:12,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.label}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -506,6 +643,9 @@ export default function App() {
             <div style={{fontSize:12,color:C.dim,marginTop:4}}>
               URLs · PDFs · images · Excel · text — Gemini categorizes &amp; summarizes
             </div>
+            <div style={{fontSize:11,color:C.dim,marginTop:6,opacity:.7}}>
+              or press <kbd style={{background:C.border,borderRadius:4,padding:"1px 6px",fontSize:11,fontFamily:"inherit"}}>⌘V</kbd> anywhere to paste instantly
+            </div>
           </div>
 
           {/* Cards */}
@@ -518,7 +658,7 @@ export default function App() {
                     background:C.card, borderRadius:12, padding:18,
                     border:`1px solid ${isOpen?C.borderLit:C.border}`,
                     cursor:"pointer", transition:"all .2s",
-                    boxShadow:isOpen?`0 0 20px ${C.accentSoft}`:"none",
+                    boxShadow:isOpen?`0 0 0 3px ${C.accentSoft}`:"0 1px 4px rgba(0,0,0,0.07)",
                   }}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:8}}>
                       <h4 style={{margin:0,fontSize:13,fontWeight:700,color:C.text,lineHeight:1.4,flex:1}}>{e.title}</h4>
