@@ -111,6 +111,23 @@ function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOSt
   }).click();
 }
 
+function exportTSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.tsv`) {
+  const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
+    "Use Case","Summary","Impact / ROI","Status","Tags","Confidence","Evidence","Date Added","Notes"];
+  const esc = v => String(v ?? "").replace(/\t/g, " ").replace(/\n/g, " ");
+  const rows = entries.map((e, i) => [
+    i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
+    e.useCase, e.summary, e.impact, e.status, (e.tags||[]).join("; "),
+    e.confidence?.overall ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
+  ].map(esc).join("\t"));
+  const blob = new Blob([[h.join("\t"), ...rows].join("\n")],
+    { type: "text/tab-separated-values;charset=utf-8;" });
+  Object.assign(document.createElement("a"), {
+    href: URL.createObjectURL(blob),
+    download: fileName,
+  }).click();
+}
+
 function downloadFile(content, fileName, mimeType) {
   const blob = new Blob([content], { type: mimeType });
   Object.assign(document.createElement("a"), {
@@ -142,6 +159,18 @@ const inputS = {
   width:"100%", padding:"10px 14px", background:"#FFFFFF", border:`1px solid ${C.border}`,
   borderRadius:8, color:C.text, fontSize:14, outline:"none", fontFamily:"inherit",
   boxSizing:"border-box", transition:"border-color .2s",
+};
+const selectS = {
+  ...inputS,
+  cursor:"pointer",
+  appearance:"none",
+  WebkitAppearance:"none",
+  MozAppearance:"none",
+  paddingRight:36,
+  backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394A3B8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")",
+  backgroundRepeat:"no-repeat",
+  backgroundPosition:"right 12px center",
+  backgroundSize:"12px",
 };
 const labelS = {
   display:"block", fontSize:11, color:C.muted, marginBottom:5,
@@ -705,6 +734,8 @@ export default function App() {
   const doExport = async () => {
     if (exportFormat === "csv") {
       exportCSV(exportTarget);
+    } else if (exportFormat === "tsv") {
+      exportTSV(exportTarget);
     } else if (exportFormat === "json") {
       exportAsJson();
     } else if (exportFormat === "markdown") {
@@ -884,7 +915,7 @@ export default function App() {
               <div key={f.k} style={f.span?{gridColumn:"1/-1"}:{}}>
                 <label style={labelS}>{f.l}</label>
                 {f.sel ? (
-                  <select value={form[f.k]} onChange={e=>setForm({...form,[f.k]:e.target.value})} style={{...inputS,cursor:"pointer"}}>
+                  <select value={form[f.k]} onChange={e=>setForm({...form,[f.k]:e.target.value})} style={selectS}>
                     {f.sel.map(o=><option key={o} value={o}>{o}</option>)}
                   </select>
                 ) : f.ta ? (
@@ -914,6 +945,12 @@ export default function App() {
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        html { scroll-behavior: smooth; }
+        * { scrollbar-width: thin; scrollbar-color: #CBD5E1 transparent; }
+        *::-webkit-scrollbar { width: 10px; height: 10px; }
+        *::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; border: 2px solid transparent; background-clip: content-box; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        .surface-scroll { scrollbar-gutter: stable both-edges; }
       `}</style>
 
       {/* Paste flash toast */}
@@ -976,15 +1013,16 @@ export default function App() {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
               <div>
                 <label style={labelS}>Scope</label>
-                <select value={exportScope} onChange={e=>setExportScope(e.target.value)} style={{...inputS,cursor:"pointer"}}>
+                <select value={exportScope} onChange={e=>setExportScope(e.target.value)} style={selectS}>
                   <option value="filtered">Filtered / Current View</option>
                   <option value="all">All Entries</option>
                 </select>
               </div>
               <div>
                 <label style={labelS}>Format</label>
-                <select value={exportFormat} onChange={e=>setExportFormat(e.target.value)} style={{...inputS,cursor:"pointer"}}>
+                <select value={exportFormat} onChange={e=>setExportFormat(e.target.value)} style={selectS}>
                   <option value="csv">CSV (optional download)</option>
+                  <option value="tsv">TSV</option>
                   <option value="json">JSON</option>
                   <option value="markdown">Markdown Brief</option>
                   <option value="connector">Connector Webhook</option>
@@ -1085,7 +1123,8 @@ export default function App() {
 
       {/* ══════════ SEARCH & FILTERS ══════════ */}
       {view!=="add" && (
-        <div style={{ display:"flex", gap:8, marginBottom:10, flexWrap:"wrap" }}>
+        <div style={{ position:"sticky", top:8, zIndex:30, background:"rgba(241,245,249,0.88)", backdropFilter:"blur(8px)", border:`1px solid ${C.border}`, borderRadius:12, padding:10, marginBottom:10 }}>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <div style={{ flex:"1 1 260px", position:"relative" }}>
             <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:C.dim, fontSize:14 }}>⌕</span>
             <input value={search} onChange={e=>setSearch(e.target.value)}
@@ -1099,15 +1138,12 @@ export default function App() {
             {val:fStatus,set:setFStatus,opts:["All",...STATUS_OPTIONS],label:"Status"},
           ].map(f=>(
             <select key={f.label} value={f.val} onChange={e=>f.set(e.target.value)}
-              style={{...inputS,width:"auto",cursor:"pointer",color:f.val==="All"?C.dim:C.text}}>
+              style={{...selectS,width:"auto",color:f.val==="All"?C.dim:C.text}}>
               {f.opts.map(o=><option key={o} value={o}>{o==="All"?`All ${f.label}`:o}</option>)}
             </select>
           ))}
-        </div>
-      )}
-
-      {view!=="add" && (
-        <div style={{ display:"flex", gap:8, marginBottom:18, flexWrap:"wrap", alignItems:"center" }}>
+          </div>
+          <div style={{ display:"flex", gap:8, marginTop:8, flexWrap:"wrap", alignItems:"center" }}>
           <input
             value={semanticQuery}
             onChange={e=>setSemanticQuery(e.target.value)}
@@ -1124,6 +1160,7 @@ export default function App() {
             </button>
           )}
           {semanticInfo && <div style={{ fontSize:11, color:C.dim }}>{semanticInfo}</div>}
+          </div>
         </div>
       )}
 
@@ -1149,12 +1186,12 @@ export default function App() {
 
       {/* TABLE */}
       {view==="table" && (
-        <div style={{ overflowX:"auto", borderRadius:10, border:`1px solid ${C.border}` }}>
+        <div className="surface-scroll" style={{ overflow:"auto", borderRadius:10, border:`1px solid ${C.border}`, maxHeight:"72vh" }}>
           <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, fontFamily:"inherit" }}>
             <thead>
               <tr style={{ background:C.panel }}>
                 {["#","Title","Type","Bank","Category","AI Tech","Use Case","Impact","Status","Date"].map(h=>(
-                  <th key={h} style={{ padding:"11px 12px", textAlign:"left", color:C.dim, fontWeight:700, borderBottom:`1px solid ${C.border}`, fontSize:10, textTransform:"uppercase", letterSpacing:".5px", whiteSpace:"nowrap" }}>{h}</th>
+                  <th key={h} style={{ position:"sticky", top:0, zIndex:1, background:C.panel, padding:"11px 12px", textAlign:"left", color:C.dim, fontWeight:700, borderBottom:`1px solid ${C.border}`, fontSize:10, textTransform:"uppercase", letterSpacing:".5px", whiteSpace:"nowrap" }}>{h}</th>
                 ))}
               </tr>
             </thead>
