@@ -140,12 +140,12 @@ function downloadFile(content, fileName, mimeType) {
    PALETTE & STYLES
    ═══════════════════════════════════════════ */
 const C = {
-  bg: "#F1F5F9", panel: "#FFFFFF", card: "#FFFFFF", cardHov: "#F8FAFC",
-  border: "#E2E8F0", borderLit: "#2563EB", accent: "#2563EB",
-  accentSoft: "rgba(37,99,235,0.08)", teal: "#0D9488", tealSoft: "rgba(13,148,136,0.08)",
-  amber: "#D97706", amberSoft: "rgba(217,119,6,0.08)", rose: "#DC2626",
-  roseSoft: "rgba(220,38,38,0.08)", violet: "#7C3AED", violetSoft: "rgba(124,58,237,0.08)",
-  text: "#0F172A", muted: "#475569", dim: "#94A3B8",
+  bg: "#ECF2FA", panel: "#FFFFFF", card: "#FFFFFF", cardHov: "#F8FBFF",
+  border: "#D7E3F1", borderLit: "#2563EB", accent: "#1D4ED8",
+  accentSoft: "rgba(29,78,216,0.10)", teal: "#0F766E", tealSoft: "rgba(15,118,110,0.10)",
+  amber: "#B45309", amberSoft: "rgba(180,83,9,0.10)", rose: "#DC2626",
+  roseSoft: "rgba(220,38,38,0.10)", violet: "#6D28D9", violetSoft: "rgba(109,40,217,0.10)",
+  text: "#0B1B34", muted: "#3D526E", dim: "#7A8CA5",
 };
 const statusC = { "To Review": C.amber, Reviewed: C.teal, "Key Finding": C.violet, Archived: C.dim };
 const srcIcon = { URL:"🔗", PDF:"📄", Image:"🖼", "Excel/CSV":"📊", Text:"✏️", File:"📁",
@@ -156,9 +156,9 @@ const pill = (bg, fg) => ({
   background:bg, color:fg, borderRadius:20, fontSize:11, fontWeight:600, whiteSpace:"nowrap",
 });
 const inputS = {
-  width:"100%", padding:"10px 14px", background:"#FFFFFF", border:`1px solid ${C.border}`,
-  borderRadius:8, color:C.text, fontSize:14, outline:"none", fontFamily:"inherit",
-  boxSizing:"border-box", transition:"border-color .2s",
+  width:"100%", padding:"10px 14px", background:"#FBFDFF", border:`1px solid ${C.border}`,
+  borderRadius:10, color:C.text, fontSize:14, outline:"none", fontFamily:"inherit",
+  boxSizing:"border-box", transition:"border-color .2s, box-shadow .2s, background .2s",
 };
 const selectS = {
   ...inputS,
@@ -177,8 +177,9 @@ const labelS = {
   fontWeight:700, letterSpacing:".6px", textTransform:"uppercase",
 };
 const btnP = {
-  padding:"10px 22px", background:C.accent, color:"#fff", border:"none",
-  borderRadius:8, cursor:"pointer", fontWeight:700, fontSize:13, fontFamily:"inherit",
+  padding:"10px 22px", background:"linear-gradient(135deg, #1D4ED8 0%, #2563EB 55%, #0EA5E9 100%)", color:"#fff", border:"none",
+  borderRadius:10, cursor:"pointer", fontWeight:700, fontSize:13, fontFamily:"inherit",
+  boxShadow:"0 6px 16px rgba(29,78,216,0.28)",
 };
 
 /* ═══════════════════════════════════════════
@@ -862,7 +863,7 @@ export default function App() {
     return (
       <div style={{ maxWidth:700, margin:"0 auto" }}>
         {/* Quick add */}
-        <div style={{ padding:22, background:C.panel, borderRadius:14, border:`1px solid ${C.border}`, marginBottom:24 }}>
+        <div style={{ padding:22, background:"rgba(255,255,255,0.92)", borderRadius:14, border:`1px solid ${C.border}`, marginBottom:24, boxShadow:"0 10px 26px rgba(15,23,42,0.08)" }}>
           <h3 style={{ margin:"0 0 14px", fontSize:14, fontWeight:700, color:C.teal }}>⚡ Quick Add</h3>
           <div style={{ display:"flex", gap:8, marginBottom:12 }}>
             <input value={urlInput} onChange={e=>setUrlInput(e.target.value)} placeholder="Paste a URL…"
@@ -895,7 +896,7 @@ export default function App() {
           </button>
         </div>
         {/* Manual form */}
-        <div style={{ padding:22, background:C.panel, borderRadius:14, border:`1px solid ${C.border}` }}>
+        <div style={{ padding:22, background:"rgba(255,255,255,0.92)", borderRadius:14, border:`1px solid ${C.border}`, boxShadow:"0 10px 26px rgba(15,23,42,0.08)" }}>
           <h3 style={{ margin:"0 0 16px", fontSize:14, fontWeight:700, color:C.text }}>Manual Entry</h3>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
             {[
@@ -939,19 +940,29 @@ export default function App() {
   };
 
   return (
-    <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"'Manrope','SF Pro Display',system-ui,sans-serif", padding:"0 20px 48px" }}>
+    <div style={{
+      minHeight:"100vh",
+      background:`radial-gradient(1200px 600px at 80% -120px, rgba(37,99,235,0.16), transparent 55%), radial-gradient(900px 500px at 10% -100px, rgba(15,118,110,0.14), transparent 58%), ${C.bg}`,
+      color:C.text,
+      fontFamily:"'Manrope','SF Pro Display',system-ui,sans-serif",
+      padding:"0 20px 48px",
+    }}>
       <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
 
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes drift{0%{transform:translateY(0px)}50%{transform:translateY(-4px)}100%{transform:translateY(0px)}}
         html { scroll-behavior: smooth; }
         * { scrollbar-width: thin; scrollbar-color: #CBD5E1 transparent; }
         *::-webkit-scrollbar { width: 10px; height: 10px; }
         *::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; border: 2px solid transparent; background-clip: content-box; }
         *::-webkit-scrollbar-track { background: transparent; }
         .surface-scroll { scrollbar-gutter: stable both-edges; }
+        .glass-panel { background: rgba(255,255,255,0.86); backdrop-filter: blur(10px); }
       `}</style>
+
+      <div style={{maxWidth:1280, margin:"0 auto"}}>
 
       {/* Paste flash toast */}
       {pasteFlash && (
@@ -1084,7 +1095,7 @@ export default function App() {
       )}
 
       {/* ══════════ HEADER ══════════ */}
-      <header style={{ padding:"24px 0 16px", borderBottom:`1px solid ${C.border}`, marginBottom:20, display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12 }}>
+      <header className="glass-panel" style={{ padding:"18px 16px", border:`1px solid ${C.border}`, borderRadius:14, margin:"16px 0 20px", display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:12, boxShadow:"0 8px 24px rgba(15,23,42,0.07)" }}>
         <div>
           <h1 style={{ margin:0, fontSize:22, fontFamily:"'JetBrains Mono',monospace", fontWeight:700, color:C.teal, letterSpacing:"-0.5px" }}>
             ◆ BankAI Canvas
@@ -1123,7 +1134,7 @@ export default function App() {
 
       {/* ══════════ SEARCH & FILTERS ══════════ */}
       {view!=="add" && (
-        <div style={{ position:"sticky", top:8, zIndex:30, background:"rgba(241,245,249,0.88)", backdropFilter:"blur(8px)", border:`1px solid ${C.border}`, borderRadius:12, padding:10, marginBottom:10 }}>
+        <div className="glass-panel" style={{ position:"sticky", top:8, zIndex:30, border:`1px solid ${C.border}`, borderRadius:12, padding:10, marginBottom:10, boxShadow:"0 6px 16px rgba(15,23,42,0.05)" }}>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <div style={{ flex:"1 1 260px", position:"relative" }}>
             <span style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:C.dim, fontSize:14 }}>⌕</span>
@@ -1173,7 +1184,7 @@ export default function App() {
             {n:entries.filter(e=>e.status==="Key Finding").length,l:"Key Findings",c:C.violet},
             {n:[...new Set(entries.map(e=>e.bank))].length,l:"Banks",c:C.teal},
           ].map(s=>(
-            <div key={s.l} style={{ flex:"1 1 120px", padding:"14px 18px", background:C.panel, borderRadius:10, border:`1px solid ${C.border}` }}>
+            <div key={s.l} style={{ flex:"1 1 120px", padding:"14px 18px", background:C.panel, borderRadius:12, border:`1px solid ${C.border}`, boxShadow:"0 4px 14px rgba(15,23,42,0.05)" }}>
               <div style={{ fontSize:22, fontWeight:800, color:s.c, fontFamily:"'JetBrains Mono',monospace" }}>{s.n}</div>
               <div style={{ fontSize:10, color:C.dim, fontWeight:700, textTransform:"uppercase", letterSpacing:".5px", marginTop:2 }}>{s.l}</div>
             </div>
@@ -1228,13 +1239,14 @@ export default function App() {
             style={{
               padding:"36px 20px", marginBottom:22, borderRadius:14,
               border:`2px dashed ${isDragOver?C.teal:C.border}`,
-              background:isDragOver?C.tealSoft:C.panel,
+              background:isDragOver?C.tealSoft:"rgba(255,255,255,0.9)",
               textAlign:"center", cursor:"pointer", transition:"all .25s",
+              boxShadow:"0 10px 28px rgba(15,23,42,0.06)",
             }}>
             <input ref={fileRef} type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.txt,.md,.doc,.docx"
               onChange={async e=>{for(const f of Array.from(e.target.files))await ingestFile(f);e.target.value="";}}
               style={{display:"none"}} />
-            <div style={{fontSize:36,marginBottom:6}}>{isDragOver?"📥":"◆"}</div>
+            <div style={{fontSize:36,marginBottom:6,animation:"drift 3s ease-in-out infinite"}}>{isDragOver?"📥":"◆"}</div>
             <div style={{fontSize:15,fontWeight:700,color:isDragOver?C.teal:C.text}}>
               {isDragOver?"Release to analyze":"Drop anything here"}
             </div>
@@ -1294,7 +1306,7 @@ export default function App() {
                     background:C.card, borderRadius:12, padding:18,
                     border:`1px solid ${isOpen?C.borderLit:C.border}`,
                     cursor:"pointer", transition:"all .2s",
-                    boxShadow:isOpen?`0 0 0 3px ${C.accentSoft}`:"0 1px 4px rgba(0,0,0,0.07)",
+                    boxShadow:isOpen?`0 0 0 3px ${C.accentSoft}, 0 10px 28px rgba(15,23,42,0.12)`:"0 6px 18px rgba(15,23,42,0.08)",
                   }}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:8,flexWrap:"wrap"}}>
                       <h4 style={{margin:0,fontSize:13,fontWeight:700,color:C.text,lineHeight:1.4,flex:"1 1 220px",overflowWrap:"anywhere"}}>{e.title}</h4>
@@ -1379,6 +1391,7 @@ export default function App() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
