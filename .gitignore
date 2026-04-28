@@ -4,3 +4,6 @@ dist
 .env.local
 .firebase
 functions/node_modules
+package-lock.json
+functions/package-lock.json
+.DS_Store
