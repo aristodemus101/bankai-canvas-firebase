@@ -189,7 +189,40 @@ ${JSON.stringify(compactEntries).slice(0, 150000)}`;
         return res.status(400).json({ error: "Missing content" });
       }
 
-      const prompt = `You are a banking & fintech research analyst. Analyze the following source material about AI use cases in banking.
+      const isMulti = action === "analyze_multi";
+      const instruction = isMulti
+        ? `You are a banking & fintech research analyst. Extract distinct AI initiatives/use cases from the source.
+
+Return ONLY a valid JSON object — no markdown, no backticks, no extra text.
+
+{
+  "initiatives": [
+    {
+      "title": "short descriptive title (max 80 chars)",
+      "summary": "2-3 sentence summary",
+      "bank_mentioned": "primary bank, or 'Other / Multiple'",
+      "category": "best fit from: Customer Service & Chatbots, Fraud Detection & Risk, Credit Scoring & Underwriting, Process Automation (RPA), Wealth Management & Advisory, Regulatory & Compliance, Personalization & Marketing, Cybersecurity, Document Processing, Trading & Market Analysis, KYC / AML, Other",
+      "ai_technology": "specific AI/ML tech (NLP, Computer Vision, LLM, GenAI, ML, Deep Learning, RPA, etc.)",
+      "use_case": "one-line description of the AI use case",
+      "impact": "quantified impact if mentioned, or 'Not specified'",
+      "tags": ["3-7 concise tags"],
+      "confidence": {
+        "overall": "0-100 integer",
+        "category": "0-100 integer",
+        "bank": "0-100 integer"
+      },
+      "evidence": ["up to 3 short supporting quotes or facts from the source"]
+    }
+  ]
+}
+
+Rules:
+- Each initiative should represent one distinct use case or program.
+- Include initiatives from different banks separately when present.
+- Return up to 20 initiatives, ordered by relevance and specificity.
+- If only one initiative exists, return one item in initiatives.
+`
+        : `You are a banking & fintech research analyst. Analyze the following source material about AI use cases in banking.
 
 Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fields:
 
@@ -210,10 +243,10 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fi
   "evidence": ["up to 3 short supporting quotes or facts from the source"]
 }
 
-Content:
-${sourceText.slice(0, 11000)}`;
+`;
+      const prompt = `${instruction}\nContent:\n${sourceText.slice(0, 11000)}`;
 
-      const parsed = await callGeminiJson({ key, prompt, maxOutputTokens: 1400 });
+      const parsed = await callGeminiJson({ key, prompt, maxOutputTokens: isMulti ? 2500 : 1400 });
       return res.status(200).json({
         ...parsed,
         extracted: extracted || null,

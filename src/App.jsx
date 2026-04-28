@@ -1,5 +1,7 @@
 // src/App.jsx — BankAI Research Canvas (Firebase + Gemini Edition)
 import { useState, useRef, useEffect } from "react";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { db, auth, googleProvider } from "./firebase";
 import {
   collection, addDoc, updateDoc, deleteDoc, doc, query, where,
@@ -9,6 +11,8 @@ import {
   signInWithPopup, signOut, onAuthStateChanged,
   createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail,
 } from "firebase/auth";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 /* ═══════════════════════════════════════════
    CONSTANTS
@@ -395,6 +399,37 @@ export default function App() {
     ...ov,
   });
 
+  const extractInitiatives = (ai, fallbackTitle) => {
+    const list = Array.isArray(ai?.initiatives) && ai.initiatives.length ? ai.initiatives : [ai];
+    return list.map((item, idx) => ({
+      ...item,
+      title: item?.title || `${fallbackTitle} · Initiative ${idx + 1}`,
+      extracted: ai?.extracted || item?.extracted || null,
+    }));
+  };
+
+  const extractPdfText = async (file) => {
+    try {
+      const bytes = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+      const pageLimit = Math.min(pdf.numPages, 24);
+      const chunks = [];
+      for (let i = 1; i <= pageLimit; i += 1) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const txt = content.items
+          .map(item => (typeof item.str === "string" ? item.str : ""))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (txt) chunks.push(txt);
+      }
+      return chunks.join("\n").slice(0, 24000);
+    } catch {
+      return "";
+    }
+  };
+
   const buildAiEntry = (ai, overrides = {}) => baseEntry({
     title: ai.title || overrides.title || "Untitled",
     sourceType: overrides.sourceType || "Text",
@@ -473,18 +508,21 @@ export default function App() {
       label,
       sourceType: "URL",
       payloadBuilder: () => ({
-        action: "analyze",
+        action: "analyze_multi",
         url,
-        content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
+        content: `Extract ALL distinct AI initiatives and use cases from this source, splitting by bank/program when possible: ${url}`,
       }),
       onComplete: async (ai) => {
-        const entry = buildAiEntry(ai, {
-          title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
-          sourceType: "URL",
-          url,
-        });
-        await addEntry(entry);
-        pushSuccessToast(`Added to canvas: ${entry.title}`);
+        const initiatives = extractInitiatives(ai, url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70));
+        for (const initiative of initiatives) {
+          const entry = buildAiEntry(initiative, {
+            title: initiative.title,
+            sourceType: "URL",
+            url,
+          });
+          await addEntry(entry);
+        }
+        pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from URL`);
       },
     });
   };
@@ -496,14 +534,17 @@ export default function App() {
       id,
       label,
       sourceType: "Text",
-      payloadBuilder: () => ({ action: "analyze", content: text }),
+      payloadBuilder: () => ({ action: "analyze_multi", content: text }),
       onComplete: async (ai) => {
-        const entry = buildAiEntry(ai, {
-          title: ai.title || text.slice(0, 65).replace(/\n/g, " ") + "…",
-          sourceType: "Text",
-        });
-        await addEntry(entry);
-        pushSuccessToast(`Added to canvas: ${entry.title}`);
+        const initiatives = extractInitiatives(ai, text.slice(0, 65).replace(/\n/g, " ") + "…");
+        for (const initiative of initiatives) {
+          const entry = buildAiEntry(initiative, {
+            title: initiative.title,
+            sourceType: "Text",
+          });
+          await addEntry(entry);
+        }
+        pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from text`);
       },
     });
   };
@@ -515,18 +556,24 @@ export default function App() {
     else if (file.type.startsWith("image")) sType = "Image";
     else if (file.name.match(/\.(xlsx|xls|csv)$/i)) sType = "Excel/CSV";
     let text = `File: ${file.name} (${sType}, ${(file.size / 1024).toFixed(1)} KB)`;
-    if (file.type.startsWith("text") || file.name.match(/\.(csv|txt|md|json)$/i)) {
+    if (sType === "PDF") {
+      const pdfText = await extractPdfText(file);
+      if (pdfText) text += "\n" + pdfText;
+    } else if (file.type.startsWith("text") || file.name.match(/\.(csv|txt|md|json)$/i)) {
       text += "\n" + (await file.text()).slice(0, 4000);
     }
     await runIngestJob({
       id,
       label: file.name.slice(0, 50),
       sourceType: sType,
-      payloadBuilder: () => ({ action: "analyze", content: text }),
+      payloadBuilder: () => ({ action: "analyze_multi", content: text }),
       onComplete: async (ai) => {
-        const entry = buildAiEntry(ai, { title: file.name, sourceType: sType });
-        await addEntry(entry);
-        pushSuccessToast(`Added to canvas: ${entry.title}`);
+        const initiatives = extractInitiatives(ai, file.name);
+        for (const initiative of initiatives) {
+          const entry = buildAiEntry(initiative, { title: initiative.title, sourceType: sType });
+          await addEntry(entry);
+        }
+        pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from ${sType}`);
       },
     });
   };
@@ -687,42 +734,64 @@ export default function App() {
       label,
       sourceType: "URL",
       payloadBuilder: () => ({
-        action: "analyze",
+        action: "analyze_multi",
         url,
         content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
       }),
       onComplete: async (ai) => {
+        const initiatives = extractInitiatives(ai, url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70));
+        const primary = initiatives[0] || ai;
         if (choice === "merge") {
-          await mergeEntryFromAi(existing, ai);
+          await mergeEntryFromAi(existing, primary);
+          for (const initiative of initiatives.slice(1)) {
+            const extra = buildAiEntry(initiative, {
+              title: initiative.title,
+              sourceType: "URL",
+              url,
+              notes: `Split from duplicate source ${existing.id}`,
+            });
+            await addEntry(extra);
+          }
           pushSuccessToast(`Merged into existing card: ${existing.title}`);
           return;
         }
         if (choice === "update") {
           await updateEntry(existing.id, {
-            title: ai.title || existing.title,
-            summary: ai.summary || existing.summary,
-            bank: ai.bank_mentioned || existing.bank,
-            category: ai.category || existing.category,
-            aiTech: ai.ai_technology || existing.aiTech,
-            useCase: ai.use_case || existing.useCase,
-            impact: ai.impact || existing.impact,
-            tags: Array.isArray(ai.tags) ? ai.tags.slice(0, 10) : existing.tags,
-            confidence: ai.confidence || existing.confidence,
-            evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : existing.evidence,
-            extractedSnapshot: ai.extracted || existing.extractedSnapshot || null,
+            title: primary.title || existing.title,
+            summary: primary.summary || existing.summary,
+            bank: primary.bank_mentioned || existing.bank,
+            category: primary.category || existing.category,
+            aiTech: primary.ai_technology || existing.aiTech,
+            useCase: primary.use_case || existing.useCase,
+            impact: primary.impact || existing.impact,
+            tags: Array.isArray(primary.tags) ? primary.tags.slice(0, 10) : existing.tags,
+            confidence: primary.confidence || existing.confidence,
+            evidence: Array.isArray(primary.evidence) ? primary.evidence.slice(0, 3) : existing.evidence,
+            extractedSnapshot: primary.extracted || existing.extractedSnapshot || null,
           });
+          for (const initiative of initiatives.slice(1)) {
+            const extra = buildAiEntry(initiative, {
+              title: initiative.title,
+              sourceType: "URL",
+              url,
+              notes: `Split from updated duplicate source ${existing.id}`,
+            });
+            await addEntry(extra);
+          }
           pushSuccessToast(`Updated existing card: ${existing.title}`);
           return;
         }
 
-        const entry = buildAiEntry(ai, {
-          title: ai.title || url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70),
-          sourceType: "URL",
-          url,
-          notes: `Duplicate of ${existing.id}`,
-        });
-        await addEntry(entry);
-        pushSuccessToast(`Added duplicate as new card: ${entry.title}`);
+        for (const initiative of initiatives) {
+          const entry = buildAiEntry(initiative, {
+            title: initiative.title,
+            sourceType: "URL",
+            url,
+            notes: `Duplicate of ${existing.id}`,
+          });
+          await addEntry(entry);
+        }
+        pushSuccessToast(`Added ${initiatives.length} duplicate card${initiatives.length!==1?"s":""}`);
       },
     });
   };
