@@ -9,7 +9,13 @@ const { getAuth } = require("firebase-admin/auth");
 initializeApp();
 
 const geminiKey = defineSecret("GEMINI_API_KEY");
-const ALLOWED_EMAIL = "divyaanshmehta513@gmail.com"; // model: gemini-2.0-flash-lite
+const ALLOWED_EMAIL = "divyaanshmehta513@gmail.com";
+const MODEL_CANDIDATES = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-2.0-flash-lite-001",
+];
 
 exports.summarize = onRequest(
   { cors: true, secrets: [geminiKey], invoker: "public" },
@@ -60,25 +66,43 @@ Content:
 ${content.slice(0, 4000)}`;
 
     try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${key}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.3, maxOutputTokens: 800 },
-          }),
-        }
-      );
+      let data = null;
+      let lastErrText = "";
 
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error("Gemini error:", errText);
+      for (const model of MODEL_CANDIDATES) {
+        const body = {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 800 },
+        };
+
+        // 2.5 models may spend many tokens on thinking unless explicitly disabled.
+        if (model.startsWith("gemini-2.5")) {
+          body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+        }
+
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
+        );
+
+        if (response.ok) {
+          data = await response.json();
+          break;
+        }
+
+        lastErrText = await response.text();
+        console.warn(`Gemini model ${model} failed:`, lastErrText);
+      }
+
+      if (!data) {
+        console.error("Gemini error: no model succeeded.", lastErrText);
         return res.status(502).json({ error: "Gemini API error" });
       }
 
-      const data = await response.json();
       const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
       const parsed = JSON.parse(cleaned);
