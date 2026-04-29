@@ -304,8 +304,10 @@ function AuthScreen() {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(false);
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("canvas");
+  const [viewLoading, setViewLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [fCat, setFCat] = useState("All");
   const [fBank, setFBank] = useState("All");
@@ -329,12 +331,52 @@ export default function App() {
   const [pasteFlash, setPasteFlash] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [editing, setEditing] = useState(null);
+  const [actionLoading, setActionLoading] = useState({});
+  const [cardActionLoading, setCardActionLoading] = useState({});
+  const [feedbackModal, setFeedbackModal] = useState(null);
   const [urlInput, setUrlInput] = useState("");
   const [pasteInput, setPasteInput] = useState("");
   const fileRef = useRef(null);
   const lastPaste = useRef({ text: "", time: 0 });
   const retryStore = useRef({});
   const lastAutoDedupeCount = useRef(0);
+
+  const showFeedback = (type, title, message) => {
+    setFeedbackModal({ type, title, message });
+  };
+
+  const runAction = async ({ key, run, successTitle, successMessage, errorTitle = "Action failed" }) => {
+    setActionLoading(prev => ({ ...prev, [key]: true }));
+    try {
+      const result = await run();
+      if (successTitle || successMessage) {
+        showFeedback("success", successTitle || "Success", successMessage || "Action completed.");
+      }
+      return result;
+    } catch (err) {
+      showFeedback("error", errorTitle, err?.message || "Something went wrong.");
+      return null;
+    } finally {
+      setActionLoading(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const runCardAction = async ({ id, key, run, successTitle, successMessage, errorTitle = "Card action failed" }) => {
+    const loadingKey = `${id}:${key}`;
+    setCardActionLoading(prev => ({ ...prev, [loadingKey]: true }));
+    try {
+      const result = await run();
+      if (successTitle || successMessage) {
+        showFeedback("success", successTitle || "Success", successMessage || "Card updated.");
+      }
+      return result;
+    } catch (err) {
+      showFeedback("error", errorTitle, err?.message || "Unable to update this card.");
+      return null;
+    } finally {
+      setCardActionLoading(prev => ({ ...prev, [loadingKey]: false }));
+    }
+  };
 
   /* ─── Queue helpers ─── */
   const enqueue = (label) => {
@@ -397,6 +439,7 @@ export default function App() {
   /* ─── Firestore real-time listener ─── */
   useEffect(() => {
     if (!user) { setEntries([]); return; }
+    setEntriesLoading(true);
     const q = query(
       collection(db, COLLECTION),
       where("uid", "==", user.uid),
@@ -404,9 +447,16 @@ export default function App() {
     );
     const unsub = onSnapshot(q, (snap) => {
       setEntries(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setEntriesLoading(false);
     });
     return unsub;
   }, [user]);
+
+  useEffect(() => {
+    setViewLoading(true);
+    const timer = setTimeout(() => setViewLoading(false), 220);
+    return () => clearTimeout(timer);
+  }, [view]);
 
   /* ─── Firestore CRUD ─── */
   const addEntry = async (data) => {
@@ -419,19 +469,43 @@ export default function App() {
     await updateDoc(doc(db, COLLECTION, id), data);
   };
   const removeEntry = async (id) => {
-    await updateDoc(doc(db, COLLECTION, id), {
-      isDeleted: true,
-      deletedAt: new Date().toISOString(),
+    await runAction({
+      key: "trash-card",
+      run: async () => {
+        await updateDoc(doc(db, COLLECTION, id), {
+          isDeleted: true,
+          deletedAt: new Date().toISOString(),
+        });
+      },
+      successTitle: "Moved to trash",
+      successMessage: "Card moved to trash. You can restore it anytime.",
+      errorTitle: "Delete failed",
     });
     setExpanded(null);
   };
 
   const restoreEntry = async (id) => {
-    await updateDoc(doc(db, COLLECTION, id), { isDeleted: false, deletedAt: null });
+    await runAction({
+      key: "restore-card",
+      run: async () => {
+        await updateDoc(doc(db, COLLECTION, id), { isDeleted: false, deletedAt: null });
+      },
+      successTitle: "Card restored",
+      successMessage: "The card is back in your active view.",
+      errorTitle: "Restore failed",
+    });
   };
 
   const removeEntryPermanent = async (id) => {
-    await deleteDoc(doc(db, COLLECTION, id));
+    await runAction({
+      key: "delete-permanent",
+      run: async () => {
+        await deleteDoc(doc(db, COLLECTION, id));
+      },
+      successTitle: "Permanently deleted",
+      successMessage: "The card was permanently removed.",
+      errorTitle: "Permanent delete failed",
+    });
   };
 
   /* ─── Filtering ─── */
@@ -566,66 +640,70 @@ export default function App() {
   const consolidateDuplicateCards = async (reason = "manual") => {
     if (!activeEntries.length) return;
     setDedupeLoading(true);
-    const response = await aiDedupeClusters(
-      activeEntries.map(e => ({
-        id: e.id,
-        title: e.title,
-        summary: e.summary,
-        useCase: e.useCase,
-        bank: e.bank,
-        category: e.category,
-        url: e.url,
-        sourceType: e.sourceType,
-      })),
-      user
-    );
+    try {
+      const response = await aiDedupeClusters(
+        activeEntries.map(e => ({
+          id: e.id,
+          title: e.title,
+          summary: e.summary,
+          useCase: e.useCase,
+          bank: e.bank,
+          category: e.category,
+          url: e.url,
+          sourceType: e.sourceType,
+        })),
+        user
+      );
 
-    const clusters = (response.clusters || []).filter(c => Array.isArray(c.ids) && c.ids.length > 1 && (c.confidence ?? 0) >= 60);
-    let mergedCount = 0;
+      const clusters = (response.clusters || []).filter(c => Array.isArray(c.ids) && c.ids.length > 1 && (c.confidence ?? 0) >= 60);
+      let mergedCount = 0;
 
-    for (const cluster of clusters) {
-      const clusterEntries = cluster.ids
-        .map(id => activeEntries.find(e => e.id === id))
-        .filter(Boolean);
-      if (clusterEntries.length < 2) continue;
+      for (const cluster of clusters) {
+        const clusterEntries = cluster.ids
+          .map(id => activeEntries.find(e => e.id === id))
+          .filter(Boolean);
+        if (clusterEntries.length < 2) continue;
 
-      const primary = clusterEntries[0];
-      const secondaries = clusterEntries.slice(1);
-      const mergedTags = [...new Set(clusterEntries.flatMap(e => e.tags || []))].slice(0, 15);
-      const mergedEvidence = [...new Set(clusterEntries.flatMap(e => e.evidence || []))].slice(0, 6);
-      const refs = mergeSourceRefs(clusterEntries.map(e => ({
-        sourceRefs: (e.sourceRefs && e.sourceRefs.length)
-          ? e.sourceRefs
-          : [makeSourceRef({ sourceType: e.sourceType, url: e.url, title: e.title, id: e.id })],
-      })));
+        const primary = clusterEntries[0];
+        const secondaries = clusterEntries.slice(1);
+        const mergedTags = [...new Set(clusterEntries.flatMap(e => e.tags || []))].slice(0, 15);
+        const mergedEvidence = [...new Set(clusterEntries.flatMap(e => e.evidence || []))].slice(0, 6);
+        const refs = mergeSourceRefs(clusterEntries.map(e => ({
+          sourceRefs: (e.sourceRefs && e.sourceRefs.length)
+            ? e.sourceRefs
+            : [makeSourceRef({ sourceType: e.sourceType, url: e.url, title: e.title, id: e.id })],
+        })));
 
-      await updateEntry(primary.id, {
-        tags: mergedTags,
-        evidence: mergedEvidence,
-        sourceRefs: refs,
-        sourceCount: refs.length,
-        notes: primary.notes
-          ? `${primary.notes}\n\nConsolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`
-          : `Consolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`,
-      });
-
-      for (const s of secondaries) {
-        await updateEntry(s.id, {
-          isDeleted: true,
-          deletedAt: new Date().toISOString(),
-          notes: s.notes
-            ? `${s.notes}\n\nMerged into ${primary.id} (${cluster.topic || "same topic"})`
-            : `Merged into ${primary.id} (${cluster.topic || "same topic"})`,
+        await updateEntry(primary.id, {
+          tags: mergedTags,
+          evidence: mergedEvidence,
+          sourceRefs: refs,
+          sourceCount: refs.length,
+          notes: primary.notes
+            ? `${primary.notes}\n\nConsolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`
+            : `Consolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`,
         });
-        mergedCount += 1;
-      }
-    }
 
-    setDedupeLoading(false);
-    if (mergedCount > 0) {
-      pushSuccessToast(`Consolidated ${mergedCount} duplicate card${mergedCount!==1?"s":""}`);
-    } else {
-      pushSuccessToast("No strong duplicate clusters detected");
+        for (const s of secondaries) {
+          await updateEntry(s.id, {
+            isDeleted: true,
+            deletedAt: new Date().toISOString(),
+            notes: s.notes
+              ? `${s.notes}\n\nMerged into ${primary.id} (${cluster.topic || "same topic"})`
+              : `Merged into ${primary.id} (${cluster.topic || "same topic"})`,
+          });
+          mergedCount += 1;
+        }
+      }
+
+      if (mergedCount > 0) {
+        pushSuccessToast(`Consolidated ${mergedCount} duplicate card${mergedCount!==1?"s":""}`);
+      } else {
+        pushSuccessToast("No strong duplicate clusters detected");
+      }
+      return mergedCount;
+    } finally {
+      setDedupeLoading(false);
     }
   };
 
@@ -817,7 +895,16 @@ export default function App() {
 
   const cycleStatus = async (entry) => {
     const next = STATUS_OPTIONS[(STATUS_OPTIONS.indexOf(entry.status)+1)%STATUS_OPTIONS.length];
-    await updateEntry(entry.id, { status: next });
+    await runCardAction({
+      id: entry.id,
+      key: "cycle-status",
+      run: async () => {
+        await updateEntry(entry.id, { status: next });
+      },
+      successTitle: "Status updated",
+      successMessage: `${entry.title || "Card"} moved to ${next}.`,
+      errorTitle: "Status update failed",
+    });
   };
 
   const clearSemantic = () => {
@@ -827,23 +914,30 @@ export default function App() {
 
   const runSemantic = async () => {
     if (!semanticQuery.trim()) return;
-    setSemanticLoading(true);
-    const ranked = await aiSemanticSearch(
-      semanticQuery.trim(),
-      filtered.map(e => ({
-        id: e.id,
-        title: e.title,
-        summary: e.summary,
-        useCase: e.useCase,
-        bank: e.bank,
-        category: e.category,
-        tags: e.tags || [],
-      })),
-      user
-    );
-    setSemanticIds(Array.isArray(ranked.ids) ? ranked.ids : []);
-    setSemanticInfo(ranked.explanation || "Semantic ranking applied.");
-    setSemanticLoading(false);
+    await runAction({
+      key: "semantic",
+      run: async () => {
+        setSemanticLoading(true);
+        const ranked = await aiSemanticSearch(
+          semanticQuery.trim(),
+          filtered.map(e => ({
+            id: e.id,
+            title: e.title,
+            summary: e.summary,
+            useCase: e.useCase,
+            bank: e.bank,
+            category: e.category,
+            tags: e.tags || [],
+          })),
+          user
+        );
+        setSemanticIds(Array.isArray(ranked.ids) ? ranked.ids : []);
+        setSemanticInfo(ranked.explanation || "Semantic ranking applied.");
+      },
+      successTitle: "Semantic ranking complete",
+      successMessage: "The current list was ranked by intent similarity.",
+      errorTitle: "Semantic ranking failed",
+    }).finally(() => setSemanticLoading(false));
   };
 
   const exportTarget = exportScope === "all" ? activeEntries : semanticFiltered;
@@ -885,16 +979,22 @@ export default function App() {
       pushSuccessToast("All active cards already have structure fields.");
       return;
     }
-    setBackfillLoading(true);
-    for (const entry of targets) {
-      try {
-        await inferStructureForEntry(entry);
-      } catch {
-        // Continue to next entry if one fails.
-      }
-    }
-    setBackfillLoading(false);
-    pushSuccessToast(`Backfilled structure for ${targets.length} card${targets.length !== 1 ? "s" : ""}`);
+    await runAction({
+      key: "backfill",
+      run: async () => {
+        setBackfillLoading(true);
+        for (const entry of targets) {
+          try {
+            await inferStructureForEntry(entry);
+          } catch {
+            // Continue to next entry if one fails.
+          }
+        }
+      },
+      successTitle: "Structure backfill complete",
+      successMessage: `Backfilled structure for ${targets.length} card${targets.length !== 1 ? "s" : ""}.`,
+      errorTitle: "Backfill failed",
+    }).finally(() => setBackfillLoading(false));
   };
 
   const exportAsJson = () => {
@@ -948,20 +1048,25 @@ export default function App() {
   };
 
   const doExport = async () => {
-    if (exportFormat === "csv") {
-      exportCSV(exportTarget);
-    } else if (exportFormat === "tsv") {
-      exportTSV(exportTarget);
-    } else if (exportFormat === "json") {
-      exportAsJson();
-    } else if (exportFormat === "markdown") {
-      exportAsMarkdown();
-    } else if (exportFormat === "connector") {
-      await sendToConnector();
-    }
-    if (exportFormat !== "connector") {
-      pushSuccessToast(`Exported ${exportTarget.length} item${exportTarget.length!==1?"s":""}`);
-    }
+    await runAction({
+      key: "export",
+      run: async () => {
+        if (exportFormat === "csv") {
+          exportCSV(exportTarget);
+        } else if (exportFormat === "tsv") {
+          exportTSV(exportTarget);
+        } else if (exportFormat === "json") {
+          exportAsJson();
+        } else if (exportFormat === "markdown") {
+          exportAsMarkdown();
+        } else if (exportFormat === "connector") {
+          await sendToConnector();
+        }
+      },
+      successTitle: "Export complete",
+      successMessage: `Exported ${exportTarget.length} item${exportTarget.length!==1?"s":""} as ${exportFormat.toUpperCase()}.`,
+      errorTitle: "Export failed",
+    });
     setExportOpen(false);
   };
 
@@ -976,77 +1081,85 @@ export default function App() {
       return;
     }
 
-    await runIngestJob({
-      id,
-      label,
-      sourceType: "URL",
-      payloadBuilder: () => ({
-        action: "analyze_multi",
-        url,
-        content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
-      }),
-      onComplete: async (ai) => {
-        const initiatives = extractInitiatives(ai, url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70));
-        const primary = initiatives[0] || ai;
-        if (choice === "merge") {
-          await mergeEntryFromAi(existing, primary);
-          for (const initiative of initiatives.slice(1)) {
-            const extra = buildAiEntry(initiative, {
-              title: initiative.title,
-              sourceType: "URL",
-              url,
-              notes: `Split from duplicate source ${existing.id}`,
-              sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-            });
-            await addEntry(extra);
-          }
-          pushSuccessToast(`Merged into existing card: ${existing.title}`);
-          return;
-        }
-        if (choice === "update") {
-          await updateEntry(existing.id, {
-            title: primary.title || existing.title,
-            summary: primary.summary || existing.summary,
-            bank: primary.bank_mentioned || existing.bank,
-            category: primary.category || existing.category,
-            aiTech: primary.ai_technology || existing.aiTech,
-            useCase: primary.use_case || existing.useCase,
-            impact: primary.impact || existing.impact,
-            division: primary.division || existing.division || "Not specified",
-            area: primary.area || existing.area || "Not specified",
-            scale: primary.scale || existing.scale || "Not specified",
-            techSophistication: primary.tech_sophistication || existing.techSophistication || "Not specified",
-            tags: Array.isArray(primary.tags) ? primary.tags.slice(0, 10) : existing.tags,
-            confidence: primary.confidence || existing.confidence,
-            evidence: Array.isArray(primary.evidence) ? primary.evidence.slice(0, 3) : existing.evidence,
-            extractedSnapshot: primary.extracted || existing.extractedSnapshot || null,
-          });
-          for (const initiative of initiatives.slice(1)) {
-            const extra = buildAiEntry(initiative, {
-              title: initiative.title,
-              sourceType: "URL",
-              url,
-              notes: `Split from updated duplicate source ${existing.id}`,
-              sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-            });
-            await addEntry(extra);
-          }
-          pushSuccessToast(`Updated existing card: ${existing.title}`);
-          return;
-        }
-
-        for (const initiative of initiatives) {
-          const entry = buildAiEntry(initiative, {
-            title: initiative.title,
-            sourceType: "URL",
+    await runAction({
+      key: "dedupe-choice",
+      run: async () => {
+        await runIngestJob({
+          id,
+          label,
+          sourceType: "URL",
+          payloadBuilder: () => ({
+            action: "analyze_multi",
             url,
-            notes: `Duplicate of ${existing.id}`,
-            sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-          });
-          await addEntry(entry);
-        }
-        pushSuccessToast(`Added ${initiatives.length} duplicate card${initiatives.length!==1?"s":""}`);
+            content: `Analyze this banking AI source URL and extract evidence-rich details: ${url}`,
+          }),
+          onComplete: async (ai) => {
+            const initiatives = extractInitiatives(ai, url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70));
+            const primary = initiatives[0] || ai;
+            if (choice === "merge") {
+              await mergeEntryFromAi(existing, primary);
+              for (const initiative of initiatives.slice(1)) {
+                const extra = buildAiEntry(initiative, {
+                  title: initiative.title,
+                  sourceType: "URL",
+                  url,
+                  notes: `Split from duplicate source ${existing.id}`,
+                  sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
+                });
+                await addEntry(extra);
+              }
+              pushSuccessToast(`Merged into existing card: ${existing.title}`);
+              return;
+            }
+            if (choice === "update") {
+              await updateEntry(existing.id, {
+                title: primary.title || existing.title,
+                summary: primary.summary || existing.summary,
+                bank: primary.bank_mentioned || existing.bank,
+                category: primary.category || existing.category,
+                aiTech: primary.ai_technology || existing.aiTech,
+                useCase: primary.use_case || existing.useCase,
+                impact: primary.impact || existing.impact,
+                division: primary.division || existing.division || "Not specified",
+                area: primary.area || existing.area || "Not specified",
+                scale: primary.scale || existing.scale || "Not specified",
+                techSophistication: primary.tech_sophistication || existing.techSophistication || "Not specified",
+                tags: Array.isArray(primary.tags) ? primary.tags.slice(0, 10) : existing.tags,
+                confidence: primary.confidence || existing.confidence,
+                evidence: Array.isArray(primary.evidence) ? primary.evidence.slice(0, 3) : existing.evidence,
+                extractedSnapshot: primary.extracted || existing.extractedSnapshot || null,
+              });
+              for (const initiative of initiatives.slice(1)) {
+                const extra = buildAiEntry(initiative, {
+                  title: initiative.title,
+                  sourceType: "URL",
+                  url,
+                  notes: `Split from updated duplicate source ${existing.id}`,
+                  sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
+                });
+                await addEntry(extra);
+              }
+              pushSuccessToast(`Updated existing card: ${existing.title}`);
+              return;
+            }
+
+            for (const initiative of initiatives) {
+              const entry = buildAiEntry(initiative, {
+                title: initiative.title,
+                sourceType: "URL",
+                url,
+                notes: `Duplicate of ${existing.id}`,
+                sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
+              });
+              await addEntry(entry);
+            }
+            pushSuccessToast(`Added ${initiatives.length} duplicate card${initiatives.length!==1?"s":""}`);
+          },
+        });
       },
+      successTitle: "Duplicate handling complete",
+      successMessage: "The selected duplicate resolution path was applied.",
+      errorTitle: "Duplicate action failed",
     });
   };
 
@@ -1074,12 +1187,21 @@ export default function App() {
   const FormView = () => {
     const [form, setForm] = useState(editing || baseEntry({}));
     const saveForm = async () => {
-      if (editing?.id) {
-        const { id, uid, createdAt, ...rest } = form;
-        await updateEntry(editing.id, rest);
-      } else {
-        await addEntry(form);
-      }
+      const result = await runAction({
+        key: "save-form",
+        run: async () => {
+          if (editing?.id) {
+            const { id, uid, createdAt, ...rest } = form;
+            await updateEntry(editing.id, rest);
+          } else {
+            await addEntry(form);
+          }
+        },
+        successTitle: editing?.id ? "Card updated" : "Card added",
+        successMessage: editing?.id ? "Changes were saved successfully." : "New card added to canvas.",
+        errorTitle: "Save failed",
+      });
+      if (result === null) return;
       setEditing(null); setView("canvas");
     };
     return (
@@ -1157,7 +1279,7 @@ export default function App() {
             ))}
           </div>
           <div style={{ marginTop:18, display:"flex", gap:8 }}>
-            <button onClick={saveForm} style={btnP}>{editing?.id?"Update":"Add Entry"}</button>
+            <button onClick={saveForm} disabled={!!actionLoading["save-form"]} style={{...btnP, opacity:actionLoading["save-form"]?0.6:1}}>{actionLoading["save-form"] ? "Saving..." : (editing?.id?"Update":"Add Entry")}</button>
             <button onClick={()=>{setEditing(null);setView("canvas");}} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Cancel</button>
           </div>
         </div>
@@ -1234,11 +1356,11 @@ export default function App() {
               This URL already exists as <strong>{dedupeModal.existing.title}</strong>. Choose how to handle this source.
             </p>
             <div style={{display:"grid",gap:8,marginBottom:12}}>
-              <button onClick={()=>applyDedupeChoice("merge")} style={{...btnP,justifySelf:"start"}}>Merge Insights Into Existing</button>
-              <button onClick={()=>applyDedupeChoice("update")} style={{...btnP,justifySelf:"start",background:C.teal}}>Replace Existing AI Analysis</button>
-              <button onClick={()=>applyDedupeChoice("new")} style={{...btnP,justifySelf:"start",background:C.violet}}>Add As New Card Anyway</button>
+              <button disabled={!!actionLoading["dedupe-choice"]} onClick={()=>applyDedupeChoice("merge")} style={{...btnP,justifySelf:"start",opacity:actionLoading["dedupe-choice"]?0.6:1}}>{actionLoading["dedupe-choice"] ? "Working..." : "Merge Insights Into Existing"}</button>
+              <button disabled={!!actionLoading["dedupe-choice"]} onClick={()=>applyDedupeChoice("update")} style={{...btnP,justifySelf:"start",background:C.teal,opacity:actionLoading["dedupe-choice"]?0.6:1}}>{actionLoading["dedupe-choice"] ? "Working..." : "Replace Existing AI Analysis"}</button>
+              <button disabled={!!actionLoading["dedupe-choice"]} onClick={()=>applyDedupeChoice("new")} style={{...btnP,justifySelf:"start",background:C.violet,opacity:actionLoading["dedupe-choice"]?0.6:1}}>{actionLoading["dedupe-choice"] ? "Working..." : "Add As New Card Anyway"}</button>
             </div>
-            <button onClick={()=>applyDedupeChoice("cancel")} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Cancel</button>
+            <button disabled={!!actionLoading["dedupe-choice"]} onClick={()=>applyDedupeChoice("cancel")} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`,opacity:actionLoading["dedupe-choice"]?0.6:1}}>Cancel</button>
           </div>
         </div>
       )}
@@ -1276,8 +1398,23 @@ export default function App() {
               {exportScope === "all" ? `Exporting all ${activeEntries.length} active entries.` : `Exporting current subset (${semanticFiltered.length} entries).`}
             </div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <button onClick={doExport} style={btnP}>Run Export</button>
+              <button onClick={doExport} disabled={!!actionLoading["export"]} style={{...btnP,opacity:actionLoading["export"]?0.6:1}}>{actionLoading["export"] ? "Exporting..." : "Run Export"}</button>
               <button onClick={()=>setExportOpen(false)} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {feedbackModal && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.45)",zIndex:1150,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div style={{width:"100%",maxWidth:460,background:C.panel,border:`1px solid ${feedbackModal.type === "error" ? C.rose : C.teal}66`,borderRadius:14,padding:18,boxShadow:"0 20px 50px rgba(2,6,23,0.24)"}}>
+            <h3 style={{margin:"0 0 8px",fontSize:16,color:C.text}}>{feedbackModal.type === "error" ? "Action Failed" : "Action Complete"}</h3>
+            <div style={{fontSize:13,fontWeight:700,color:feedbackModal.type === "error" ? C.rose : C.teal,marginBottom:8}}>{feedbackModal.title}</div>
+            <p style={{margin:"0 0 14px",fontSize:12,color:C.muted,lineHeight:1.5}}>{feedbackModal.message}</p>
+            <div style={{display:"flex",justifyContent:"flex-end"}}>
+              <button onClick={()=>setFeedbackModal(null)} style={{...btnP,padding:"8px 14px",background:feedbackModal.type === "error" ? C.rose : C.teal}}>
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -1356,13 +1493,19 @@ export default function App() {
             background:C.violetSoft, color:C.violet,
             cursor:(backfillLoading || !activeEntries.length)?"not-allowed":"pointer",
             fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(backfillLoading || !activeEntries.length)?0.5:1,
-          }}>{backfillLoading ? "Backfilling…" : "Backfill Structure"}</button>
-          <button onClick={()=>consolidateDuplicateCards("manual")} disabled={dedupeLoading || activeEntries.length < 2} style={{
+          }}>{backfillLoading || actionLoading["backfill"] ? "Backfilling..." : "Backfill Structure"}</button>
+          <button onClick={()=>runAction({
+            key: "dedupe-manual",
+            run: async () => { await consolidateDuplicateCards("manual"); },
+            successTitle: "Duplicate consolidation complete",
+            successMessage: "Duplicate clustering pass has finished.",
+            errorTitle: "Duplicate consolidation failed",
+          })} disabled={dedupeLoading || activeEntries.length < 2 || !!actionLoading["dedupe-manual"]} style={{
             padding:"7px 14px", borderRadius:7, border:`1px solid ${C.accent}`,
             background:C.accentSoft, color:C.accent,
-            cursor:(dedupeLoading || activeEntries.length < 2)?"not-allowed":"pointer",
-            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(dedupeLoading || activeEntries.length < 2)?0.5:1,
-          }}>{dedupeLoading ? "Consolidating…" : "Consolidate Duplicates"}</button>
+            cursor:(dedupeLoading || activeEntries.length < 2 || actionLoading["dedupe-manual"])?"not-allowed":"pointer",
+            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(dedupeLoading || activeEntries.length < 2 || actionLoading["dedupe-manual"])?0.5:1,
+          }}>{dedupeLoading || actionLoading["dedupe-manual"] ? "Consolidating..." : "Consolidate Duplicates"}</button>
           <label style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:11,color:C.muted,padding:"0 6px"}}>
             <input type="checkbox" checked={autoConsolidate} onChange={e=>setAutoConsolidate(e.target.checked)} />
             Auto consolidate every 25 cards
@@ -1406,7 +1549,7 @@ export default function App() {
             onKeyDown={e=>{ if (e.key === "Enter") runSemantic(); }}
           />
           <button onClick={runSemantic} disabled={semanticLoading || !semanticQuery.trim()} style={{...btnP, opacity:(semanticLoading || !semanticQuery.trim())?0.6:1}}>
-            {semanticLoading ? "Ranking…" : "Semantic Rank"}
+            {semanticLoading || actionLoading["semantic"] ? "Ranking..." : "Semantic Rank"}
           </button>
           {semanticIds.length > 0 && (
             <button onClick={clearSemantic} style={{...btnP, background:"transparent", color:C.muted, border:`1px solid ${C.border}`}}>
@@ -1447,6 +1590,28 @@ export default function App() {
       )}
 
       {/* ══════════ VIEWS ══════════ */}
+      {(entriesLoading || viewLoading) && (
+        <div style={{
+          marginBottom:14,
+          padding:"12px 14px",
+          border:`1px solid ${C.border}`,
+          borderRadius:12,
+          background:"rgba(255,255,255,0.92)",
+          display:"inline-flex",
+          alignItems:"center",
+          gap:8,
+          color:C.muted,
+          fontSize:12,
+          fontWeight:700,
+        }}>
+          <span style={{
+            width:14,height:14,borderRadius:"50%",border:`2px solid ${C.accent}`,borderTopColor:"transparent",
+            animation:"spin .8s linear infinite",
+          }} />
+          {entriesLoading ? "Syncing entries..." : "Loading view..."}
+        </div>
+      )}
+
       {view==="add" && <FormView />}
 
       {view==="trash" && (
@@ -1458,8 +1623,8 @@ export default function App() {
                 <div style={{fontSize:11,color:C.dim,marginTop:4}}>Deleted: {e.deletedAt || "unknown"}</div>
               </div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                <button onClick={()=>restoreEntry(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.teal}`,background:C.tealSoft,color:C.teal,cursor:"pointer",fontWeight:700,fontSize:11}}>Restore</button>
-                <button onClick={()=>removeEntryPermanent(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:"pointer",fontWeight:700,fontSize:11}}>Delete Permanently</button>
+                <button disabled={!!actionLoading["restore-card"]} onClick={()=>restoreEntry(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.teal}`,background:C.tealSoft,color:C.teal,cursor:actionLoading["restore-card"]?"not-allowed":"pointer",fontWeight:700,fontSize:11,opacity:actionLoading["restore-card"]?0.6:1}}>{actionLoading["restore-card"] ? "Restoring..." : "Restore"}</button>
+                <button disabled={!!actionLoading["delete-permanent"]} onClick={()=>removeEntryPermanent(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:actionLoading["delete-permanent"]?"not-allowed":"pointer",fontWeight:700,fontSize:11,opacity:actionLoading["delete-permanent"]?0.6:1}}>{actionLoading["delete-permanent"] ? "Deleting..." : "Delete Permanently"}</button>
               </div>
             </div>
           )) : (
@@ -1470,12 +1635,21 @@ export default function App() {
 
       {/* TABLE */}
       {view==="table" && (
-        <div className="surface-scroll" style={{ overflow:"auto", borderRadius:10, border:`1px solid ${C.border}`, maxHeight:"72vh" }}>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, fontFamily:"inherit" }}>
+        <div style={{border:`1px solid ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.9)",padding:10}}>
+          <div style={{fontSize:11,color:C.dim,fontWeight:700,textTransform:"uppercase",letterSpacing:".5px",marginBottom:8}}>Spreadsheet View · Scroll both directions</div>
+          <div className="surface-scroll" style={{ overflow:"auto", borderRadius:10, border:`1px solid ${C.border}`, maxHeight:"72vh", maxWidth:"100%" }}>
+          <table style={{ minWidth:1760, width:"max-content", borderCollapse:"separate", borderSpacing:0, fontSize:12, fontFamily:"inherit" }}>
             <thead>
               <tr style={{ background:C.panel }}>
                 {["#","Title","Type","Bank","Division","Area","Scale","Category","AI Tech","Use Case","Impact","Status","Date"].map(h=>(
-                  <th key={h} style={{ position:"sticky", top:0, zIndex:1, background:C.panel, padding:"11px 12px", textAlign:"left", color:C.dim, fontWeight:700, borderBottom:`1px solid ${C.border}`, fontSize:10, textTransform:"uppercase", letterSpacing:".5px", whiteSpace:"nowrap" }}>{h}</th>
+                  <th key={h} style={{
+                    position:"sticky", top:0, zIndex:h === "#" || h === "Title" ? 5 : 4,
+                    left:h === "#" ? 0 : (h === "Title" ? 56 : undefined),
+                    background:C.panel,
+                    padding:"11px 12px", textAlign:"left", color:C.dim, fontWeight:700,
+                    borderBottom:`1px solid ${C.border}`, borderRight:`1px solid ${C.border}`,
+                    fontSize:10, textTransform:"uppercase", letterSpacing:".5px", whiteSpace:"nowrap"
+                  }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1485,24 +1659,25 @@ export default function App() {
                   style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer", transition:"background .15s" }}
                   onMouseEnter={ev=>ev.currentTarget.style.background=C.card}
                   onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
-                  <td style={{padding:"9px 12px",color:C.dim}}>{i+1}</td>
-                  <td style={{padding:"9px 12px",color:C.text,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}</td>
-                  <td style={{padding:"9px 12px"}}><span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span></td>
-                  <td style={{padding:"9px 12px",color:C.text}}>{e.bank}</td>
-                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap"}}>{e.division||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.muted,whiteSpace:"nowrap"}}>{e.area||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap"}}>{e.scale||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.muted}}>{e.category}</td>
-                  <td style={{padding:"9px 12px",color:C.text}}>{e.aiTech}</td>
-                  <td style={{padding:"9px 12px",color:C.muted,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.useCase}</td>
-                  <td style={{padding:"9px 12px",color:C.text}}>{e.impact}</td>
-                  <td style={{padding:"9px 12px"}}><span style={pill(`${statusC[e.status]}18`,statusC[e.status])}><span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}</span></td>
-                  <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap"}}>{e.dateAdded}</td>
+                  <td style={{position:"sticky",left:0,zIndex:3,padding:"9px 12px",color:C.dim,background:C.panel,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",width:56,minWidth:56}}>{i+1}</td>
+                  <td style={{position:"sticky",left:56,zIndex:3,padding:"9px 12px",color:C.text,maxWidth:280,minWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",background:C.panel,borderRight:`1px solid ${C.border}`}}>{e.title}</td>
+                  <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`}}><span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span></td>
+                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",minWidth:170}}>{e.bank}</td>
+                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:140}}>{e.division||"Not specified"}</td>
+                  <td style={{padding:"9px 12px",color:C.muted,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:150}}>{e.area||"Not specified"}</td>
+                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:130}}>{e.scale||"Not specified"}</td>
+                  <td style={{padding:"9px 12px",color:C.muted,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.category}</td>
+                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.aiTech}</td>
+                  <td style={{padding:"9px 12px",color:C.muted,maxWidth:260,minWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`}}>{e.useCase}</td>
+                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:170}}>{e.impact}</td>
+                  <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`,minWidth:140}}><span style={pill(`${statusC[e.status]}18`,statusC[e.status])}><span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}</span></td>
+                  <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap",minWidth:120}}>{e.dateAdded}</td>
                 </tr>
               ))}
               {!semanticFiltered.length && <tr><td colSpan={13} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -1667,8 +1842,8 @@ export default function App() {
                         )}
                         <div style={{marginTop:12,display:"flex",gap:6,flexWrap:"wrap"}}>
                           <button onClick={ev=>{ev.stopPropagation();setEditing(e);setView("add");}} style={{padding:"5px 12px",background:C.accentSoft,color:C.accent,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Edit</button>
-                          <button onClick={ev=>{ev.stopPropagation();cycleStatus(e);}} style={{padding:"5px 12px",background:C.tealSoft,color:C.teal,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Cycle Status</button>
-                          <button onClick={ev=>{ev.stopPropagation();removeEntry(e.id);}} style={{padding:"5px 12px",background:C.roseSoft,color:C.rose,border:"none",borderRadius:6,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit"}}>Delete</button>
+                          <button disabled={!!cardActionLoading[`${e.id}:cycle-status`]} onClick={ev=>{ev.stopPropagation();cycleStatus(e);}} style={{padding:"5px 12px",background:C.tealSoft,color:C.teal,border:"none",borderRadius:6,cursor:cardActionLoading[`${e.id}:cycle-status`] ? "not-allowed" : "pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",opacity:cardActionLoading[`${e.id}:cycle-status`] ? 0.6 : 1}}>{cardActionLoading[`${e.id}:cycle-status`] ? "Updating..." : "Cycle Status"}</button>
+                          <button disabled={!!actionLoading["trash-card"]} onClick={ev=>{ev.stopPropagation();removeEntry(e.id);}} style={{padding:"5px 12px",background:C.roseSoft,color:C.rose,border:"none",borderRadius:6,cursor:actionLoading["trash-card"]?"not-allowed":"pointer",fontSize:11,fontWeight:700,fontFamily:"inherit",opacity:actionLoading["trash-card"]?0.6:1}}>{actionLoading["trash-card"] ? "Deleting..." : "Delete"}</button>
                         </div>
                       </div>
                     )}
