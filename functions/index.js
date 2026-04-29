@@ -194,6 +194,48 @@ ${JSON.stringify(compactEntries).slice(0, 150000)}`;
         });
       }
 
+      if (action === "dedupe_clusters") {
+        if (!Array.isArray(entries)) {
+          return res.status(400).json({ error: "Missing entries" });
+        }
+
+        const compactEntries = entries.slice(0, 300).map((e, idx) => ({
+          id: e.id || `row_${idx + 1}`,
+          title: e.title || "",
+          summary: e.summary || "",
+          useCase: e.useCase || "",
+          bank: e.bank || "",
+          category: e.category || "",
+          url: e.url || "",
+          sourceType: e.sourceType || "",
+        }));
+
+        const dedupePrompt = `You are an enterprise knowledge deduplication assistant.
+Given entry list JSON, identify groups of entries that represent the SAME initiative/topic even if title wording differs.
+
+Return ONLY valid JSON:
+{
+  "clusters": [
+    {
+      "topic": "short topic label",
+      "ids": ["entry_id_1", "entry_id_2"],
+      "confidence": 0-100
+    }
+  ]
+}
+
+Rules:
+- Include only clusters with 2 or more entries.
+- Be conservative; avoid false merges.
+- Prefer same bank/use-case/topic overlaps.
+
+Entries JSON:
+${JSON.stringify(compactEntries).slice(0, 170000)}`;
+
+        const dedupe = await callGeminiJson({ key, prompt: dedupePrompt, maxOutputTokens: 700 });
+        return res.status(200).json({ clusters: Array.isArray(dedupe.clusters) ? dedupe.clusters : [] });
+      }
+
       if (action === "infer_structure") {
         const structurePrompt = `You are an enterprise banking AI taxonomy analyst.
 

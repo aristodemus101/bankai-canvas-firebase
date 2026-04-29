@@ -99,17 +99,25 @@ async function aiSemanticSearch(textQuery, entries, user) {
   }
 }
 
+async function aiDedupeClusters(entries, user) {
+  try {
+    return await aiRequest({ action: "dedupe_clusters", entries }, user);
+  } catch {
+    return { clusters: [] };
+  }
+}
+
 /* ═══════════════════════════════════════════
    CSV EXPORT
    ═══════════════════════════════════════════ */
 function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.csv`) {
   const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
-    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Date Added","Notes"];
+    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Source References","Date Added","Notes"];
   const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = entries.map((e, i) => [
     i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
     e.useCase, e.summary, e.impact, e.division, e.area, e.scale, e.techSophistication, e.status, (e.tags||[]).join("; "),
-    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
+    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), (e.sourceRefs||[]).map(r => r.url || r.title).join(" | "), e.dateAdded, e.notes,
   ].map(esc).join(","));
   const blob = new Blob(["\uFEFF" + [h.map(esc).join(","), ...rows].join("\n")],
     { type: "text/csv;charset=utf-8;" });
@@ -121,12 +129,12 @@ function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOSt
 
 function exportTSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.tsv`) {
   const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
-    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Date Added","Notes"];
+    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Source References","Date Added","Notes"];
   const esc = v => String(v ?? "").replace(/\t/g, " ").replace(/\n/g, " ");
   const rows = entries.map((e, i) => [
     i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
     e.useCase, e.summary, e.impact, e.division, e.area, e.scale, e.techSophistication, e.status, (e.tags||[]).join("; "),
-    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
+    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), (e.sourceRefs||[]).map(r => r.url || r.title).join(" | "), e.dateAdded, e.notes,
   ].map(esc).join("\t"));
   const blob = new Blob([[h.join("\t"), ...rows].join("\n")],
     { type: "text/tab-separated-values;charset=utf-8;" });
@@ -311,6 +319,8 @@ export default function App() {
   const [semanticInfo, setSemanticInfo] = useState("");
   const [semanticLoading, setSemanticLoading] = useState(false);
   const [backfillLoading, setBackfillLoading] = useState(false);
+  const [dedupeLoading, setDedupeLoading] = useState(false);
+  const [autoConsolidate, setAutoConsolidate] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState("filtered");
   const [exportFormat, setExportFormat] = useState("csv");
@@ -324,6 +334,7 @@ export default function App() {
   const fileRef = useRef(null);
   const lastPaste = useRef({ text: "", time: 0 });
   const retryStore = useRef({});
+  const lastAutoDedupeCount = useRef(0);
 
   /* ─── Queue helpers ─── */
   const enqueue = (label) => {
@@ -448,6 +459,19 @@ export default function App() {
       .sort((a, b) => semanticIds.indexOf(a.id) - semanticIds.indexOf(b.id))
     : filtered;
 
+  useEffect(() => {
+    if (!autoConsolidate || dedupeLoading) return;
+    if (activeEntries.length < 25) return;
+    if (lastAutoDedupeCount.current === 0) {
+      lastAutoDedupeCount.current = activeEntries.length;
+      return;
+    }
+    if (activeEntries.length - lastAutoDedupeCount.current >= 25) {
+      lastAutoDedupeCount.current = activeEntries.length;
+      consolidateDuplicateCards("auto-25");
+    }
+  }, [activeEntries.length, autoConsolidate, dedupeLoading]);
+
   /* ─── Ingest helpers ─── */
   const baseEntry = (ov) => ({
     title:"", sourceType:"Text", url:"", bank:"Other / Multiple",
@@ -455,6 +479,7 @@ export default function App() {
     division:"Not specified", area:"Not specified", scale:"Not specified", techSophistication:"Not specified",
     status:"To Review", tags:[], dateAdded:new Date().toISOString().slice(0,10),
     notes:"", confidence:{ overall: 0, category: 0, bank: 0 }, evidence:[], extractedSnapshot:null,
+    sourceRefs:[], sourceCount:0,
     isDeleted:false, deletedAt:null,
     ...ov,
   });
@@ -508,8 +533,97 @@ export default function App() {
     confidence: ai.confidence || { overall: 35, category: 35, bank: 35, structure: 35 },
     evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : [],
     extractedSnapshot: ai.extracted || null,
+    sourceRefs: Array.isArray(overrides.sourceRefs) ? overrides.sourceRefs : [],
+    sourceCount: Array.isArray(overrides.sourceRefs) ? overrides.sourceRefs.length : 0,
     ...overrides,
   });
+
+  const makeSourceRef = ({ sourceType, url, title, id }) => ({
+    sourceType: sourceType || "Text",
+    url: url || "",
+    title: title || "Untitled",
+    refId: id || "",
+    addedAt: new Date().toISOString(),
+  });
+
+  const mergeSourceRefs = (items) => {
+    const all = items.flatMap(x => Array.isArray(x?.sourceRefs) ? x.sourceRefs : []);
+    const dedup = [];
+    const seen = new Set();
+    for (const ref of all) {
+      const key = `${ref.url || ""}|${ref.title || ""}|${ref.sourceType || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedup.push(ref);
+    }
+    return dedup;
+  };
+
+  const consolidateDuplicateCards = async (reason = "manual") => {
+    if (!activeEntries.length) return;
+    setDedupeLoading(true);
+    const response = await aiDedupeClusters(
+      activeEntries.map(e => ({
+        id: e.id,
+        title: e.title,
+        summary: e.summary,
+        useCase: e.useCase,
+        bank: e.bank,
+        category: e.category,
+        url: e.url,
+        sourceType: e.sourceType,
+      })),
+      user
+    );
+
+    const clusters = (response.clusters || []).filter(c => Array.isArray(c.ids) && c.ids.length > 1 && (c.confidence ?? 0) >= 60);
+    let mergedCount = 0;
+
+    for (const cluster of clusters) {
+      const clusterEntries = cluster.ids
+        .map(id => activeEntries.find(e => e.id === id))
+        .filter(Boolean);
+      if (clusterEntries.length < 2) continue;
+
+      const primary = clusterEntries[0];
+      const secondaries = clusterEntries.slice(1);
+      const mergedTags = [...new Set(clusterEntries.flatMap(e => e.tags || []))].slice(0, 15);
+      const mergedEvidence = [...new Set(clusterEntries.flatMap(e => e.evidence || []))].slice(0, 6);
+      const refs = mergeSourceRefs(clusterEntries.map(e => ({
+        sourceRefs: (e.sourceRefs && e.sourceRefs.length)
+          ? e.sourceRefs
+          : [makeSourceRef({ sourceType: e.sourceType, url: e.url, title: e.title, id: e.id })],
+      })));
+
+      await updateEntry(primary.id, {
+        tags: mergedTags,
+        evidence: mergedEvidence,
+        sourceRefs: refs,
+        sourceCount: refs.length,
+        notes: primary.notes
+          ? `${primary.notes}\n\nConsolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`
+          : `Consolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`,
+      });
+
+      for (const s of secondaries) {
+        await updateEntry(s.id, {
+          isDeleted: true,
+          deletedAt: new Date().toISOString(),
+          notes: s.notes
+            ? `${s.notes}\n\nMerged into ${primary.id} (${cluster.topic || "same topic"})`
+            : `Merged into ${primary.id} (${cluster.topic || "same topic"})`,
+        });
+        mergedCount += 1;
+      }
+    }
+
+    setDedupeLoading(false);
+    if (mergedCount > 0) {
+      pushSuccessToast(`Consolidated ${mergedCount} duplicate card${mergedCount!==1?"s":""}`);
+    } else {
+      pushSuccessToast("No strong duplicate clusters detected");
+    }
+  };
 
   const mergeEntryFromAi = async (existing, ai) => {
     const mergedTags = [...new Set([...(existing.tags || []), ...(ai.tags || [])])].slice(0, 12);
@@ -587,6 +701,7 @@ export default function App() {
             title: initiative.title,
             sourceType: "URL",
             url,
+            sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
           });
           await addEntry(entry);
         }
@@ -609,6 +724,7 @@ export default function App() {
           const entry = buildAiEntry(initiative, {
             title: initiative.title,
             sourceType: "Text",
+            sourceRefs: [makeSourceRef({ sourceType: "Text", title: initiative.title })],
           });
           await addEntry(entry);
         }
@@ -638,7 +754,11 @@ export default function App() {
       onComplete: async (ai) => {
         const initiatives = extractInitiatives(ai, file.name);
         for (const initiative of initiatives) {
-          const entry = buildAiEntry(initiative, { title: initiative.title, sourceType: sType });
+          const entry = buildAiEntry(initiative, {
+            title: initiative.title,
+            sourceType: sType,
+            sourceRefs: [makeSourceRef({ sourceType: sType, title: initiative.title })],
+          });
           await addEntry(entry);
         }
         pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from ${sType}`);
@@ -872,6 +992,7 @@ export default function App() {
               sourceType: "URL",
               url,
               notes: `Split from duplicate source ${existing.id}`,
+              sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
             });
             await addEntry(extra);
           }
@@ -902,6 +1023,7 @@ export default function App() {
               sourceType: "URL",
               url,
               notes: `Split from updated duplicate source ${existing.id}`,
+              sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
             });
             await addEntry(extra);
           }
@@ -915,6 +1037,7 @@ export default function App() {
             sourceType: "URL",
             url,
             notes: `Duplicate of ${existing.id}`,
+            sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
           });
           await addEntry(entry);
         }
@@ -1230,6 +1353,16 @@ export default function App() {
             cursor:(backfillLoading || !activeEntries.length)?"not-allowed":"pointer",
             fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(backfillLoading || !activeEntries.length)?0.5:1,
           }}>{backfillLoading ? "Backfilling…" : "Backfill Structure"}</button>
+          <button onClick={()=>consolidateDuplicateCards("manual")} disabled={dedupeLoading || activeEntries.length < 2} style={{
+            padding:"7px 14px", borderRadius:7, border:`1px solid ${C.accent}`,
+            background:C.accentSoft, color:C.accent,
+            cursor:(dedupeLoading || activeEntries.length < 2)?"not-allowed":"pointer",
+            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(dedupeLoading || activeEntries.length < 2)?0.5:1,
+          }}>{dedupeLoading ? "Consolidating…" : "Consolidate Duplicates"}</button>
+          <label style={{display:"inline-flex",alignItems:"center",gap:6,fontSize:11,color:C.muted,padding:"0 6px"}}>
+            <input type="checkbox" checked={autoConsolidate} onChange={e=>setAutoConsolidate(e.target.checked)} />
+            Auto consolidate every 25 cards
+          </label>
           <button onClick={()=>signOut(auth)} style={{
             padding:"7px 14px", borderRadius:7, border:`1px solid ${C.border}`,
             background:"transparent", color:C.dim,
@@ -1495,6 +1628,20 @@ export default function App() {
                               >
                                 {e.url}
                               </a>
+                            </div>
+                          )}
+                          {(e.sourceRefs||[]).length > 0 && (
+                            <div style={{gridColumn:"1/-1"}}>
+                              <span style={{color:C.dim}}>Sources ({e.sourceRefs.length}):</span>
+                              <ul style={{margin:"6px 0 0",paddingLeft:16,color:C.text}}>
+                                {e.sourceRefs.slice(0, 8).map((ref, idx) => (
+                                  <li key={`${ref.url || ref.title}-${idx}`} style={{marginBottom:2,fontSize:12,overflowWrap:"anywhere"}}>
+                                    {ref.url ? (
+                                      <a href={ref.url} target="_blank" rel="noreferrer" onClick={ev=>ev.stopPropagation()} style={{color:C.accent,textDecoration:"none"}}>{ref.url}</a>
+                                    ) : (ref.title || `Source ${idx + 1}`)}
+                                  </li>
+                                ))}
+                              </ul>
                             </div>
                           )}
                           {e.notes && <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>Notes: </span><span style={{color:C.text}}>{e.notes}</span></div>}
