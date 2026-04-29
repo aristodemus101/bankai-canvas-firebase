@@ -29,6 +29,30 @@ const BANKS = [
   "Standard Chartered", "DBS Bank", "ICICI Bank", "HDFC Bank", "SBI",
   "Axis Bank", "Kotak Mahindra", "RBI (Central Bank)", "Other / Multiple",
 ];
+const BANK_PREFIXES = {
+  "Citibank": "C",
+  "Citi": "C",
+  "JPMorgan Chase": "JPMC",
+  "JPMC": "JPMC",
+  "Bank of America": "BOA",
+  "Wells Fargo": "WF",
+  "Goldman Sachs": "GS",
+  "Morgan Stanley": "MS",
+  HSBC: "HSBC",
+  Barclays: "BARC",
+  "Deutsche Bank": "DB",
+  UBS: "UBS",
+  "BNP Paribas": "BNP",
+  "Standard Chartered": "SCB",
+  "DBS Bank": "DBS",
+  "ICICI Bank": "ICICI",
+  "HDFC Bank": "HDFC",
+  SBI: "SBI",
+  "Axis Bank": "AXIS",
+  "Kotak Mahindra": "KOTAK",
+  "RBI (Central Bank)": "RBI",
+  "Other / Multiple": "OTH",
+};
 const STATUS_OPTIONS = ["To Review", "Reviewed", "Key Finding", "Archived"];
 const DIVISIONS = ["Front Office", "Operations", "Corporate Functions", "Engineering", "Enablers", "Not specified"];
 const AREAS = [
@@ -198,6 +222,15 @@ const btnP = {
   boxShadow:"0 6px 16px rgba(29,78,216,0.28)",
 };
 
+const getBankPrefix = (bank) => BANK_PREFIXES[bank] || String(bank || "GEN")
+  .toUpperCase()
+  .replace(/[^A-Z0-9]+/g, " ")
+  .trim()
+  .split(/\s+/)
+  .map(part => part[0])
+  .join("")
+  .slice(0, 8) || "GEN";
+
 /* ═══════════════════════════════════════════
    AUTH SCREEN
    ═══════════════════════════════════════════ */
@@ -335,12 +368,14 @@ export default function App() {
   const [actionLoading, setActionLoading] = useState({});
   const [cardActionLoading, setCardActionLoading] = useState({});
   const [feedbackModal, setFeedbackModal] = useState(null);
+  const [pendingPermanentDelete, setPendingPermanentDelete] = useState(null);
   const [urlInput, setUrlInput] = useState("");
   const [pasteInput, setPasteInput] = useState("");
   const fileRef = useRef(null);
   const lastPaste = useRef({ text: "", time: 0 });
   const retryStore = useRef({});
   const lastAutoDedupeCount = useRef(0);
+  const cardCodeBackfillDone = useRef(false);
 
   const showFeedback = (type, title, message) => {
     setFeedbackModal({ type, title, message });
@@ -460,11 +495,31 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [view]);
 
+  useEffect(() => {
+    if (!user || !hasBootedEntries || cardCodeBackfillDone.current) return;
+    const missing = entries.filter(e => !e.cardCode);
+    if (!missing.length) {
+      cardCodeBackfillDone.current = true;
+      return;
+    }
+    cardCodeBackfillDone.current = true;
+    const reservedCodes = new Set(entries.map(e => e.cardCode).filter(Boolean));
+    (async () => {
+      for (const entry of missing) {
+        const cardCode = allocateCardCode(entry.bank, entries, reservedCodes);
+        await updateEntry(entry.id, { cardCode, productName: entry.productName || entry.title || "Untitled" });
+      }
+    })();
+  }, [user, hasBootedEntries, entries]);
+
   /* ─── Firestore CRUD ─── */
   const addEntry = async (data) => {
     if (!user) return;
+    const finalRecord = normalizeCardRecord(data);
     await addDoc(collection(db, COLLECTION), {
-      ...data, uid: user.uid, createdAt: serverTimestamp(),
+      ...finalRecord,
+      uid: user.uid,
+      createdAt: serverTimestamp(),
     });
   };
   const updateEntry = async (id, data) => {
@@ -554,7 +609,7 @@ export default function App() {
 
   /* ─── Ingest helpers ─── */
   const baseEntry = (ov) => ({
-    title:"", sourceType:"Text", url:"", bank:"Other / Multiple",
+    title:"", productName:"", cardCode:"", sourceType:"Text", url:"", bank:"Other / Multiple",
     category:"Other", aiTech:"", useCase:"", summary:"", impact:"Not specified",
     division:"Not specified", area:"Not specified", scale:"Not specified", techSophistication:"Not specified",
     status:"To Review", tags:[], dateAdded:new Date().toISOString().slice(0,10),
@@ -597,6 +652,7 @@ export default function App() {
 
   const buildAiEntry = (ai, overrides = {}) => baseEntry({
     title: ai.title || overrides.title || "Untitled",
+    productName: ai.product_name || ai.product || ai.title || overrides.productName || overrides.title || "Untitled",
     sourceType: overrides.sourceType || "Text",
     url: overrides.url || "",
     bank: ai.bank_mentioned || "Other / Multiple",
@@ -616,6 +672,29 @@ export default function App() {
     sourceRefs: Array.isArray(overrides.sourceRefs) ? overrides.sourceRefs : [],
     sourceCount: Array.isArray(overrides.sourceRefs) ? overrides.sourceRefs.length : 0,
     ...overrides,
+  });
+
+  const allocateCardCode = (bank, sourceEntries = entries, reservedCodes = new Set()) => {
+    const prefix = getBankPrefix(bank);
+    const existingNumbers = sourceEntries
+      .map(entry => entry?.cardCode)
+      .filter(code => typeof code === "string" && code.startsWith(`${prefix}-`))
+      .map(code => Number(code.slice(prefix.length + 1)))
+      .filter(num => Number.isFinite(num));
+    let nextNumber = existingNumbers.length ? Math.max(...existingNumbers) + 1 : 1;
+    let candidate = `${prefix}-${nextNumber}`;
+    while (reservedCodes.has(candidate) || sourceEntries.some(entry => entry?.cardCode === candidate)) {
+      nextNumber += 1;
+      candidate = `${prefix}-${nextNumber}`;
+    }
+    reservedCodes.add(candidate);
+    return candidate;
+  };
+
+  const normalizeCardRecord = (entry, { sourceEntries = entries, reservedCodes = new Set() } = {}) => ({
+    ...entry,
+    productName: entry.productName || entry.product_name || entry.title || "Untitled",
+    cardCode: entry.cardCode || allocateCardCode(entry.bank, sourceEntries, reservedCodes),
   });
 
   const makeSourceRef = ({ sourceType, url, title, id }) => ({
@@ -681,6 +760,9 @@ export default function App() {
           evidence: mergedEvidence,
           sourceRefs: refs,
           sourceCount: refs.length,
+          mergedFromIds: clusterEntries.slice(1).map(item => item.id),
+          mergedFromCodes: clusterEntries.slice(1).map(item => item.cardCode || item.id),
+          mergedFromTitles: clusterEntries.slice(1).map(item => item.productName || item.title || "Untitled"),
           notes: primary.notes
             ? `${primary.notes}\n\nConsolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`
             : `Consolidated duplicate cluster (${reason}) on ${new Date().toISOString().slice(0, 10)}`,
@@ -690,6 +772,10 @@ export default function App() {
           await updateEntry(s.id, {
             isDeleted: true,
             deletedAt: new Date().toISOString(),
+            mergedIntoId: primary.id,
+            mergedIntoCode: primary.cardCode || primary.id,
+            mergedIntoTitle: primary.productName || primary.title || "Untitled",
+            mergedReason: cluster.topic || reason,
             notes: s.notes
               ? `${s.notes}\n\nMerged into ${primary.id} (${cluster.topic || "same topic"})`
               : `Merged into ${primary.id} (${cluster.topic || "same topic"})`,
@@ -713,6 +799,7 @@ export default function App() {
     const mergedTags = [...new Set([...(existing.tags || []), ...(ai.tags || [])])].slice(0, 12);
     await updateEntry(existing.id, {
       summary: ai.summary || existing.summary,
+      productName: ai.product_name || ai.product || existing.productName || existing.title,
       bank: ai.bank_mentioned || existing.bank,
       category: ai.category || existing.category,
       aiTech: ai.ai_technology || existing.aiTech,
@@ -780,13 +867,15 @@ export default function App() {
       }),
       onComplete: async (ai) => {
         const initiatives = extractInitiatives(ai, url.replace(/https?:\/\/(www\.)?/, "").slice(0, 70));
+        const reservedCodes = new Set();
         for (const initiative of initiatives) {
-          const entry = buildAiEntry(initiative, {
+          const entry = normalizeCardRecord(buildAiEntry(initiative, {
             title: initiative.title,
+            productName: initiative.product_name || initiative.product || initiative.title,
             sourceType: "URL",
             url,
             sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-          });
+          }), { sourceEntries: entries, reservedCodes });
           await addEntry(entry);
         }
         pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from URL`);
@@ -804,12 +893,14 @@ export default function App() {
       payloadBuilder: () => ({ action: "analyze_multi", content: text }),
       onComplete: async (ai) => {
         const initiatives = extractInitiatives(ai, text.slice(0, 65).replace(/\n/g, " ") + "…");
+        const reservedCodes = new Set();
         for (const initiative of initiatives) {
-          const entry = buildAiEntry(initiative, {
+          const entry = normalizeCardRecord(buildAiEntry(initiative, {
             title: initiative.title,
+            productName: initiative.product_name || initiative.product || initiative.title,
             sourceType: "Text",
             sourceRefs: [makeSourceRef({ sourceType: "Text", title: initiative.title })],
-          });
+          }), { sourceEntries: entries, reservedCodes });
           await addEntry(entry);
         }
         pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from text`);
@@ -837,12 +928,14 @@ export default function App() {
       payloadBuilder: () => ({ action: "analyze_multi", content: text }),
       onComplete: async (ai) => {
         const initiatives = extractInitiatives(ai, file.name);
+        const reservedCodes = new Set();
         for (const initiative of initiatives) {
-          const entry = buildAiEntry(initiative, {
+          const entry = normalizeCardRecord(buildAiEntry(initiative, {
             title: initiative.title,
+            productName: initiative.product_name || initiative.product || initiative.title,
             sourceType: sType,
             sourceRefs: [makeSourceRef({ sourceType: sType, title: initiative.title })],
-          });
+          }), { sourceEntries: entries, reservedCodes });
           await addEntry(entry);
         }
         pushSuccessToast(`Added ${initiatives.length} card${initiatives.length!==1?"s":""} from ${sType}`);
@@ -1100,14 +1193,16 @@ export default function App() {
             const primary = initiatives[0] || ai;
             if (choice === "merge") {
               await mergeEntryFromAi(existing, primary);
+              const reservedCodes = new Set();
               for (const initiative of initiatives.slice(1)) {
-                const extra = buildAiEntry(initiative, {
+                const extra = normalizeCardRecord(buildAiEntry(initiative, {
                   title: initiative.title,
+                  productName: initiative.product_name || initiative.product || initiative.title,
                   sourceType: "URL",
                   url,
                   notes: `Split from duplicate source ${existing.id}`,
                   sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-                });
+                }), { sourceEntries: entries, reservedCodes });
                 await addEntry(extra);
               }
               pushSuccessToast(`Merged into existing card: ${existing.title}`);
@@ -1116,6 +1211,7 @@ export default function App() {
             if (choice === "update") {
               await updateEntry(existing.id, {
                 title: primary.title || existing.title,
+                productName: primary.product_name || primary.product || existing.productName || existing.title,
                 summary: primary.summary || existing.summary,
                 bank: primary.bank_mentioned || existing.bank,
                 category: primary.category || existing.category,
@@ -1131,28 +1227,32 @@ export default function App() {
                 evidence: Array.isArray(primary.evidence) ? primary.evidence.slice(0, 3) : existing.evidence,
                 extractedSnapshot: primary.extracted || existing.extractedSnapshot || null,
               });
+              const reservedCodes = new Set();
               for (const initiative of initiatives.slice(1)) {
-                const extra = buildAiEntry(initiative, {
+                const extra = normalizeCardRecord(buildAiEntry(initiative, {
                   title: initiative.title,
+                  productName: initiative.product_name || initiative.product || initiative.title,
                   sourceType: "URL",
                   url,
                   notes: `Split from updated duplicate source ${existing.id}`,
                   sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-                });
+                }), { sourceEntries: entries, reservedCodes });
                 await addEntry(extra);
               }
               pushSuccessToast(`Updated existing card: ${existing.title}`);
               return;
             }
 
+            const reservedCodes = new Set();
             for (const initiative of initiatives) {
-              const entry = buildAiEntry(initiative, {
+              const entry = normalizeCardRecord(buildAiEntry(initiative, {
                 title: initiative.title,
+                productName: initiative.product_name || initiative.product || initiative.title,
                 sourceType: "URL",
                 url,
                 notes: `Duplicate of ${existing.id}`,
                 sourceRefs: [makeSourceRef({ sourceType: "URL", url, title: initiative.title })],
-              });
+              }), { sourceEntries: entries, reservedCodes });
               await addEntry(entry);
             }
             pushSuccessToast(`Added ${initiatives.length} duplicate card${initiatives.length!==1?"s":""}`);
@@ -1254,9 +1354,9 @@ export default function App() {
         run: async () => {
           if (editing?.id) {
             const { id, uid, createdAt, ...rest } = form;
-            await updateEntry(editing.id, rest);
+            await updateEntry(editing.id, normalizeCardRecord(rest));
           } else {
-            await addEntry(form);
+            await addEntry(normalizeCardRecord(form));
           }
         },
         successTitle: editing?.id ? "Card updated" : "Card added",
@@ -1483,6 +1583,31 @@ export default function App() {
         </div>
       )}
 
+      {pendingPermanentDelete && (
+        <div style={{position:"fixed",inset:0,background:"rgba(15,23,42,0.50)",zIndex:1160,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+          <div style={{width:"100%",maxWidth:520,background:C.panel,border:`1px solid ${C.rose}55`,borderRadius:16,padding:20,boxShadow:"0 24px 60px rgba(2,6,23,0.24)"}}>
+            <h3 style={{margin:"0 0 8px",fontSize:16,color:C.text}}>Delete permanently?</h3>
+            <p style={{margin:"0 0 12px",fontSize:12,color:C.muted,lineHeight:1.6}}>
+              This is the final removal step. The card will be removed from trash and cannot be restored.
+            </p>
+            <div style={{padding:12,border:`1px solid ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.8)",marginBottom:14}}>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
+                <span style={pill(C.roseSoft,C.rose)}>{pendingPermanentDelete.cardCode || "No ID"}</span>
+                <span style={pill(C.accentSoft,C.accent)}>{srcIcon[pendingPermanentDelete.sourceType]||"📎"} {pendingPermanentDelete.sourceType || "Source"}</span>
+              </div>
+              <div style={{fontWeight:800,color:C.text}}>{pendingPermanentDelete.productName || pendingPermanentDelete.title || "Untitled"}</div>
+              {pendingPermanentDelete.mergedIntoTitle && (
+                <div style={{fontSize:12,color:C.muted,marginTop:6}}>Merged into {pendingPermanentDelete.mergedIntoCode || pendingPermanentDelete.mergedIntoId || "a primary card"}</div>
+              )}
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
+              <button onClick={()=>setPendingPermanentDelete(null)} style={{...btnP,background:"transparent",color:C.muted,border:`1px solid ${C.border}`}}>Cancel</button>
+              <button onClick={async ()=>{ const target = pendingPermanentDelete; setPendingPermanentDelete(null); if (target) await removeEntryPermanent(target.id); }} style={{...btnP,background:C.rose,boxShadow:`0 6px 16px ${C.rose}33`}}>Delete permanently</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Queue panel */}
       {queue.length > 0 && (
         <div style={{
@@ -1680,14 +1805,36 @@ export default function App() {
       {view==="trash" && (
         <div style={{display:"grid",gap:10}}>
           {trashEntries.length ? trashEntries.map((e, i) => (
-            <div key={e.id} style={{padding:14,border:`1px solid ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.9)",display:"flex",justifyContent:"space-between",gap:12,alignItems:"center"}}>
-              <div>
-                <div style={{fontSize:13,fontWeight:700,color:C.text}}>{e.title || `Deleted card ${i + 1}`}</div>
-                <div style={{fontSize:11,color:C.dim,marginTop:4}}>Deleted: {e.deletedAt || "unknown"}</div>
+            <div key={e.id} style={{padding:14,border:`1px solid ${C.border}`,borderRadius:14,background:"rgba(255,255,255,0.94)",display:"grid",gap:12,boxShadow:"0 6px 18px rgba(15,23,42,0.05)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",flexWrap:"wrap"}}>
+                <div style={{minWidth:0,flex:1}}>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                    <span style={pill(C.roseSoft,C.rose)}>{e.cardCode || `Deleted-${i + 1}`}</span>
+                    <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType || "Source"}</span>
+                    {e.mergedIntoCode && <span style={pill(C.tealSoft,C.teal)}>Merged into {e.mergedIntoCode}</span>}
+                  </div>
+                  <div style={{fontSize:14,fontWeight:800,color:C.text,lineHeight:1.35,overflowWrap:"anywhere"}}>{e.productName || e.title || `Deleted card ${i + 1}`}</div>
+                  {e.title && e.title !== e.productName && (
+                    <div style={{fontSize:12,color:C.dim,marginTop:4,overflowWrap:"anywhere"}}>{e.title}</div>
+                  )}
+                  <div style={{fontSize:11,color:C.dim,marginTop:8}}>Deleted: {e.deletedAt || "unknown"}</div>
+                  {e.mergedIntoTitle && (
+                    <div style={{fontSize:11,color:C.muted,marginTop:6}}>
+                      Consolidated into <strong>{e.mergedIntoCode || e.mergedIntoId || "a primary card"}</strong>
+                      {e.mergedIntoTitle ? ` · ${e.mergedIntoTitle}` : ""}
+                      {e.mergedReason ? ` · ${e.mergedReason}` : ""}
+                    </div>
+                  )}
+                  {(e.sourceRefs||[]).length > 0 && (
+                    <div style={{fontSize:11,color:C.muted,marginTop:6,overflowWrap:"anywhere"}}>
+                      Sources: {(e.sourceRefs || []).slice(0, 4).map(ref => ref.title || ref.url || "Source").join(" · ")}
+                    </div>
+                  )}
+                </div>
               </div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
                 <button disabled={!!actionLoading["restore-card"]} onClick={()=>restoreEntry(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.teal}`,background:C.tealSoft,color:C.teal,cursor:actionLoading["restore-card"]?"not-allowed":"pointer",fontWeight:700,fontSize:11,opacity:actionLoading["restore-card"]?0.6:1}}>{actionLoading["restore-card"] ? "Restoring..." : "Restore"}</button>
-                <button disabled={!!actionLoading["delete-permanent"]} onClick={()=>removeEntryPermanent(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:actionLoading["delete-permanent"]?"not-allowed":"pointer",fontWeight:700,fontSize:11,opacity:actionLoading["delete-permanent"]?0.6:1}}>{actionLoading["delete-permanent"] ? "Deleting..." : "Delete Permanently"}</button>
+                <button disabled={!!actionLoading["delete-permanent"]} onClick={()=>setPendingPermanentDelete(e)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:actionLoading["delete-permanent"]?"not-allowed":"pointer",fontWeight:700,fontSize:11,opacity:actionLoading["delete-permanent"]?0.6:1}}>{actionLoading["delete-permanent"] ? "Deleting..." : "Delete Permanently"}</button>
               </div>
             </div>
           )) : (
@@ -1717,26 +1864,30 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
-              {semanticFiltered.map((e,i)=>(
-                <tr key={e.id} onClick={()=>{setEditing(e);setView("add");}}
-                  style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer", transition:"background .15s" }}
-                  onMouseEnter={ev=>ev.currentTarget.style.background=C.card}
-                  onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
-                  <td style={{position:"sticky",left:0,zIndex:3,padding:"9px 12px",color:C.dim,background:C.panel,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",width:56,minWidth:56}}>{i+1}</td>
-                  <td style={{position:"sticky",left:56,zIndex:3,padding:"9px 12px",color:C.text,maxWidth:280,minWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",background:C.panel,borderRight:`1px solid ${C.border}`}}>{e.title}</td>
-                  <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`}}><span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span></td>
-                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",minWidth:170}}>{e.bank}</td>
-                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:140}}>{e.division||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.muted,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:150}}>{e.area||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:130}}>{e.scale||"Not specified"}</td>
-                  <td style={{padding:"9px 12px",color:C.muted,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.category}</td>
-                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.aiTech}</td>
-                  <td style={{padding:"9px 12px",color:C.muted,maxWidth:260,minWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`}}>{e.useCase}</td>
-                  <td title={e.impact || ""} style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:170,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.impact}</td>
-                  <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`,minWidth:140}}><span style={pill(`${statusC[e.status]}18`,statusC[e.status])}><span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}</span></td>
-                  <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap",minWidth:120}}>{e.dateAdded}</td>
-                </tr>
-              ))}
+              {semanticFiltered.map((e,i) => {
+                const displayProduct = e.productName || e.title || "Untitled";
+                const subtitleTitle = e.title && e.title !== displayProduct ? e.title : "";
+                return (
+                  <tr key={e.id} onClick={()=>{setEditing(e);setView("add");}}
+                    style={{ borderBottom:`1px solid ${C.border}`, cursor:"pointer", transition:"background .15s" }}
+                    onMouseEnter={ev=>ev.currentTarget.style.background=C.card}
+                    onMouseLeave={ev=>ev.currentTarget.style.background="transparent"}>
+                    <td style={{position:"sticky",left:0,zIndex:3,padding:"9px 12px",color:C.dim,background:C.panel,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",width:56,minWidth:56}}>{i+1}</td>
+                    <td style={{position:"sticky",left:56,zIndex:3,padding:"9px 12px",color:C.text,maxWidth:280,minWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",background:C.panel,borderRight:`1px solid ${C.border}`}}>{displayProduct}</td>
+                    <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`}}><span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span></td>
+                    <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,whiteSpace:"nowrap",minWidth:170}}>{e.bank}</td>
+                    <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:140}}>{e.division||"Not specified"}</td>
+                    <td style={{padding:"9px 12px",color:C.muted,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:150}}>{e.area||"Not specified"}</td>
+                    <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`,minWidth:130}}>{e.scale||"Not specified"}</td>
+                    <td style={{padding:"9px 12px",color:C.muted,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.category}</td>
+                    <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.aiTech}</td>
+                    <td style={{padding:"9px 12px",color:C.muted,maxWidth:260,minWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`}}>{e.useCase}</td>
+                    <td title={e.impact || ""} style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:170,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.impact}</td>
+                    <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`,minWidth:140}}><span style={pill(`${statusC[e.status]}18`,statusC[e.status])}><span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}</span></td>
+                    <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap",minWidth:120}}>{e.dateAdded}</td>
+                  </tr>
+                );
+              })}
               {!semanticFiltered.length && <tr><td colSpan={13} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
             </tbody>
           </table>
@@ -1815,6 +1966,8 @@ export default function App() {
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))", gap:14 }}>
               {semanticFiltered.map(e => {
                 const isOpen = expanded === e.id;
+                const displayProduct = e.productName || e.title || "Untitled";
+                const subtitleTitle = e.title && e.title !== displayProduct ? e.title : "";
                 return (
                   <div key={e.id} onClick={()=>setExpanded(isOpen?null:e.id)} style={{
                     background:C.card, borderRadius:12, padding:18,
@@ -1822,14 +1975,23 @@ export default function App() {
                     cursor:"pointer", transition:"all .2s",
                     boxShadow:isOpen?`0 0 0 3px ${C.accentSoft}, 0 10px 28px rgba(15,23,42,0.12)`:"0 6px 18px rgba(15,23,42,0.08)",
                   }}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-                      <h4 style={{margin:0,fontSize:13,fontWeight:700,color:C.text,lineHeight:1.4,flex:"1 1 220px",overflowWrap:"anywhere"}}>{e.title}</h4>
-                      <span style={pill(`${statusC[e.status]}18`,statusC[e.status])}>
-                        <span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}
-                      </span>
+                    <div style={{height:4,borderRadius:999,background:`linear-gradient(90deg, ${C.accent}, ${C.teal}, ${C.violet})`,marginBottom:14,opacity:0.9}} />
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:12,flexWrap:"wrap"}}>
+                      <div style={{minWidth:0,flex:1}}>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                          <span style={pill(C.tealSoft,C.teal)}>{e.cardCode || `${getBankPrefix(e.bank)}-?`}</span>
+                          <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span>
+                          <span style={pill(`${statusC[e.status]}18`,statusC[e.status])}>
+                            <span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}
+                          </span>
+                        </div>
+                        <div style={{fontSize:18,fontWeight:800,color:C.text,lineHeight:1.2,overflowWrap:"anywhere"}}>{displayProduct}</div>
+                        {subtitleTitle && (
+                          <div style={{fontSize:12,color:C.dim,marginTop:4,overflowWrap:"anywhere"}}>{subtitleTitle}</div>
+                        )}
+                      </div>
                     </div>
-                    <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
-                      <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span>
+                    <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:10}}>
                       <span style={pill(C.tealSoft,C.teal)}>{e.bank}</span>
                       <span style={pill(C.violetSoft,C.violet)}>{e.category}</span>
                       <span style={pill("rgba(14,116,144,0.10)","#0E7490")}>{e.division || "Not specified"}</span>

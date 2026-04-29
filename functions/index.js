@@ -285,6 +285,7 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text.
 {
   "initiatives": [
     {
+      "product_name": "the launched or enhanced product name, if identifiable",
       "title": "short descriptive title (max 80 chars)",
       "summary": "2-3 sentence summary",
       "bank_mentioned": "primary bank, or 'Other / Multiple'",
@@ -319,6 +320,7 @@ Rules:
 Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fields:
 
 {
+  "product_name": "the launched or enhanced product name, if identifiable",
   "title": "short descriptive title (max 80 chars)",
   "summary": "2-3 sentence summary",
   "bank_mentioned": "primary bank, or 'Other / Multiple'",
@@ -349,12 +351,14 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fi
         maxOutputTokens: isMulti ? BUDGETS.multiMaxOutputTokens : BUDGETS.singleMaxOutputTokens,
       });
       return res.status(200).json({
+        product_name: parsed.product_name || parsed.title || "",
         ...parsed,
         extracted: extracted || null,
       });
     } catch (err) {
       console.error("Summarize error:", err);
       return res.status(200).json({
+        product_name: "",
         title: "Untitled Source",
         summary: "AI summary unavailable — edit manually.",
         bank_mentioned: "Other / Multiple",
