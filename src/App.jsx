@@ -459,6 +459,10 @@ export default function App() {
       .sort((a, b) => semanticIds.indexOf(a.id) - semanticIds.indexOf(b.id))
     : filtered;
 
+  const filterCategories = ["All", ...new Set(activeEntries.map(e => e.category).filter(Boolean))];
+  const filterBanks = ["All", ...new Set(activeEntries.map(e => e.bank).filter(Boolean))];
+  const filterStatuses = ["All", ...new Set(activeEntries.map(e => e.status).filter(Boolean))];
+
   useEffect(() => {
     if (!autoConsolidate || dedupeLoading) return;
     if (activeEntries.length < 25) return;
@@ -1383,9 +1387,9 @@ export default function App() {
               onFocus={e=>e.target.style.borderColor=C.borderLit} onBlur={e=>e.target.style.borderColor=C.border} />
           </div>
           {[
-            {val:fCat,set:setFCat,opts:["All",...CATEGORIES],label:"Category"},
-            {val:fBank,set:setFBank,opts:["All",...BANKS],label:"Bank"},
-            {val:fStatus,set:setFStatus,opts:["All",...STATUS_OPTIONS],label:"Status"},
+            {val:fCat,set:setFCat,opts:filterCategories,label:"Category"},
+            {val:fBank,set:setFBank,opts:filterBanks,label:"Bank"},
+            {val:fStatus,set:setFStatus,opts:filterStatuses,label:"Status"},
           ].map(f=>(
             <select key={f.label} value={f.val} onChange={e=>f.set(e.target.value)}
               style={{...selectS,width:"auto",color:f.val==="All"?C.dim:C.text}}>
