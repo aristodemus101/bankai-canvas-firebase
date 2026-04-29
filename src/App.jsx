@@ -30,6 +30,13 @@ const BANKS = [
   "Axis Bank", "Kotak Mahindra", "RBI (Central Bank)", "Other / Multiple",
 ];
 const STATUS_OPTIONS = ["To Review", "Reviewed", "Key Finding", "Archived"];
+const DIVISIONS = ["Front Office", "Operations", "Corporate Functions", "Engineering", "Enablers", "Not specified"];
+const AREAS = [
+  "Client Experience", "Banker Enablement", "Product", "Operations", "Risk and Audit",
+  "Engineering", "Finance and Business Management", "HR", "Compliance", "Data and Analytics", "Other", "Not specified",
+];
+const SCALE_OPTIONS = ["Small", "Pilot", "Department", "Enterprise", "Cross-enterprise", "Not specified"];
+const TECH_SOPHISTICATION_OPTIONS = ["Basic", "Intermediate", "Advanced", "Frontier", "Not specified"];
 const COLLECTION = "research_entries";
 
 /* ═══════════════════════════════════════════
@@ -78,7 +85,8 @@ async function aiSummarize(payload, user) {
       title: "", summary: "AI unavailable — edit manually.",
       bank_mentioned: "Other / Multiple", category: "Other",
       ai_technology: "Unknown", use_case: "", impact: "Not specified",
-      tags: [], confidence: { overall: 30, category: 30, bank: 30 }, evidence: [],
+      division: "Not specified", area: "Not specified", scale: "Not specified", tech_sophistication: "Not specified",
+      tags: [], confidence: { overall: 30, category: 30, bank: 30, structure: 30 }, evidence: [],
     };
   }
 }
@@ -96,12 +104,12 @@ async function aiSemanticSearch(textQuery, entries, user) {
    ═══════════════════════════════════════════ */
 function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.csv`) {
   const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
-    "Use Case","Summary","Impact / ROI","Status","Tags","Confidence","Evidence","Date Added","Notes"];
+    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Date Added","Notes"];
   const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = entries.map((e, i) => [
     i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
-    e.useCase, e.summary, e.impact, e.status, (e.tags||[]).join("; "),
-    e.confidence?.overall ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
+    e.useCase, e.summary, e.impact, e.division, e.area, e.scale, e.techSophistication, e.status, (e.tags||[]).join("; "),
+    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
   ].map(esc).join(","));
   const blob = new Blob(["\uFEFF" + [h.map(esc).join(","), ...rows].join("\n")],
     { type: "text/csv;charset=utf-8;" });
@@ -113,12 +121,12 @@ function exportCSV(entries, fileName = `banking_ai_research_${new Date().toISOSt
 
 function exportTSV(entries, fileName = `banking_ai_research_${new Date().toISOString().slice(0,10)}.tsv`) {
   const h = ["ID","Title","Source Type","URL","Bank","Category","AI Technology",
-    "Use Case","Summary","Impact / ROI","Status","Tags","Confidence","Evidence","Date Added","Notes"];
+    "Use Case","Summary","Impact / ROI","Division","Area","Scale","Tech Sophistication","Status","Tags","Confidence","Structure Confidence","Evidence","Date Added","Notes"];
   const esc = v => String(v ?? "").replace(/\t/g, " ").replace(/\n/g, " ");
   const rows = entries.map((e, i) => [
     i+1, e.title, e.sourceType, e.url, e.bank, e.category, e.aiTech,
-    e.useCase, e.summary, e.impact, e.status, (e.tags||[]).join("; "),
-    e.confidence?.overall ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
+    e.useCase, e.summary, e.impact, e.division, e.area, e.scale, e.techSophistication, e.status, (e.tags||[]).join("; "),
+    e.confidence?.overall ?? "", e.confidence?.structure ?? "", (e.evidence||[]).join(" | "), e.dateAdded, e.notes,
   ].map(esc).join("\t"));
   const blob = new Blob([[h.join("\t"), ...rows].join("\n")],
     { type: "text/tab-separated-values;charset=utf-8;" });
@@ -302,6 +310,7 @@ export default function App() {
   const [semanticIds, setSemanticIds] = useState([]);
   const [semanticInfo, setSemanticInfo] = useState("");
   const [semanticLoading, setSemanticLoading] = useState(false);
+  const [backfillLoading, setBackfillLoading] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState("filtered");
   const [exportFormat, setExportFormat] = useState("csv");
@@ -399,12 +408,31 @@ export default function App() {
     await updateDoc(doc(db, COLLECTION, id), data);
   };
   const removeEntry = async (id) => {
-    await deleteDoc(doc(db, COLLECTION, id));
+    await updateDoc(doc(db, COLLECTION, id), {
+      isDeleted: true,
+      deletedAt: new Date().toISOString(),
+    });
     setExpanded(null);
   };
 
+  const restoreEntry = async (id) => {
+    await updateDoc(doc(db, COLLECTION, id), { isDeleted: false, deletedAt: null });
+  };
+
+  const removeEntryPermanent = async (id) => {
+    await deleteDoc(doc(db, COLLECTION, id));
+  };
+
   /* ─── Filtering ─── */
-  const filtered = entries.filter(e => {
+  const isMeaningfulEntry = (e) => {
+    const text = [e?.title, e?.summary, e?.useCase, e?.url].join(" ").trim();
+    return text.length > 0;
+  };
+
+  const activeEntries = entries.filter(e => !e.isDeleted && isMeaningfulEntry(e));
+  const trashEntries = entries.filter(e => e.isDeleted);
+
+  const filtered = activeEntries.filter(e => {
     if (fCat !== "All" && e.category !== fCat) return false;
     if (fBank !== "All" && e.bank !== fBank) return false;
     if (fStatus !== "All" && e.status !== fStatus) return false;
@@ -424,8 +452,10 @@ export default function App() {
   const baseEntry = (ov) => ({
     title:"", sourceType:"Text", url:"", bank:"Other / Multiple",
     category:"Other", aiTech:"", useCase:"", summary:"", impact:"Not specified",
+    division:"Not specified", area:"Not specified", scale:"Not specified", techSophistication:"Not specified",
     status:"To Review", tags:[], dateAdded:new Date().toISOString().slice(0,10),
     notes:"", confidence:{ overall: 0, category: 0, bank: 0 }, evidence:[], extractedSnapshot:null,
+    isDeleted:false, deletedAt:null,
     ...ov,
   });
 
@@ -470,8 +500,12 @@ export default function App() {
     useCase: ai.use_case || "",
     summary: ai.summary || "AI unavailable — edit manually.",
     impact: ai.impact || "Not specified",
+    division: ai.division || "Not specified",
+    area: ai.area || "Not specified",
+    scale: ai.scale || "Not specified",
+    techSophistication: ai.tech_sophistication || "Not specified",
     tags: Array.isArray(ai.tags) ? ai.tags.slice(0, 10) : [],
-    confidence: ai.confidence || { overall: 35, category: 35, bank: 35 },
+    confidence: ai.confidence || { overall: 35, category: 35, bank: 35, structure: 35 },
     evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : [],
     extractedSnapshot: ai.extracted || null,
     ...overrides,
@@ -486,6 +520,10 @@ export default function App() {
       aiTech: ai.ai_technology || existing.aiTech,
       useCase: ai.use_case || existing.useCase,
       impact: ai.impact || existing.impact,
+      division: ai.division || existing.division || "Not specified",
+      area: ai.area || existing.area || "Not specified",
+      scale: ai.scale || existing.scale || "Not specified",
+      techSophistication: ai.tech_sophistication || existing.techSophistication || "Not specified",
       evidence: Array.isArray(ai.evidence) ? ai.evidence.slice(0, 3) : (existing.evidence || []),
       confidence: ai.confidence || existing.confidence,
       tags: mergedTags,
@@ -684,7 +722,56 @@ export default function App() {
     setSemanticLoading(false);
   };
 
-  const exportTarget = exportScope === "all" ? entries : semanticFiltered;
+  const exportTarget = exportScope === "all" ? activeEntries : semanticFiltered;
+
+  const inferStructureForEntry = async (entry) => {
+    const material = [
+      `Title: ${entry.title || ""}`,
+      `Summary: ${entry.summary || ""}`,
+      `Use case: ${entry.useCase || ""}`,
+      `Impact: ${entry.impact || ""}`,
+      `Bank: ${entry.bank || ""}`,
+      entry.url ? `URL: ${entry.url}` : "",
+    ].filter(Boolean).join("\n");
+
+    const structured = await aiRequest({ action: "infer_structure", content: material }, user);
+    await updateEntry(entry.id, {
+      division: structured.division || entry.division || "Not specified",
+      area: structured.area || entry.area || "Not specified",
+      scale: structured.scale || entry.scale || "Not specified",
+      techSophistication: structured.tech_sophistication || entry.techSophistication || "Not specified",
+      impact: entry.impact && entry.impact !== "Not specified"
+        ? entry.impact
+        : (structured.impact || "Not specified"),
+      confidence: {
+        ...(entry.confidence || {}),
+        structure: structured.confidence?.structure ?? entry.confidence?.structure ?? 35,
+        overall: structured.confidence?.overall ?? entry.confidence?.overall ?? 35,
+      },
+    });
+  };
+
+  const backfillExistingStructure = async () => {
+    const targets = activeEntries.filter(e =>
+      !e.division || !e.area || !e.scale || !e.techSophistication ||
+      e.division === "Not specified" || e.area === "Not specified" ||
+      e.scale === "Not specified" || e.techSophistication === "Not specified"
+    );
+    if (!targets.length) {
+      pushSuccessToast("All active cards already have structure fields.");
+      return;
+    }
+    setBackfillLoading(true);
+    for (const entry of targets) {
+      try {
+        await inferStructureForEntry(entry);
+      } catch {
+        // Continue to next entry if one fails.
+      }
+    }
+    setBackfillLoading(false);
+    pushSuccessToast(`Backfilled structure for ${targets.length} card${targets.length !== 1 ? "s" : ""}`);
+  };
 
   const exportAsJson = () => {
     downloadFile(
@@ -700,6 +787,10 @@ export default function App() {
       `- Source: ${e.sourceType}`,
       `- Bank: ${e.bank}`,
       `- Category: ${e.category}`,
+      `- Division: ${e.division || "Not specified"}`,
+      `- Area: ${e.area || "Not specified"}`,
+      `- Scale: ${e.scale || "Not specified"}`,
+      `- Tech Sophistication: ${e.techSophistication || "Not specified"}`,
       `- AI Tech: ${e.aiTech || "Unknown"}`,
       `- Impact: ${e.impact || "Not specified"}`,
       `- Tags: ${(e.tags || []).join(", ")}`,
@@ -796,6 +887,10 @@ export default function App() {
             aiTech: primary.ai_technology || existing.aiTech,
             useCase: primary.use_case || existing.useCase,
             impact: primary.impact || existing.impact,
+            division: primary.division || existing.division || "Not specified",
+            area: primary.area || existing.area || "Not specified",
+            scale: primary.scale || existing.scale || "Not specified",
+            techSophistication: primary.tech_sophistication || existing.techSophistication || "Not specified",
             tags: Array.isArray(primary.tags) ? primary.tags.slice(0, 10) : existing.tags,
             confidence: primary.confidence || existing.confidence,
             evidence: Array.isArray(primary.evidence) ? primary.evidence.slice(0, 3) : existing.evidence,
@@ -905,6 +1000,10 @@ export default function App() {
               {k:"url",l:"URL"},
               {k:"bank",l:"Bank",sel:BANKS},
               {k:"category",l:"Category",sel:CATEGORIES},
+              {k:"division",l:"Division",sel:DIVISIONS},
+              {k:"area",l:"Area",sel:AREAS},
+              {k:"scale",l:"Scale",sel:SCALE_OPTIONS},
+              {k:"techSophistication",l:"Tech Sophistication",sel:TECH_SOPHISTICATION_OPTIONS},
               {k:"aiTech",l:"AI Technology",ph:"NLP, CV, LLM…"},
               {k:"status",l:"Status",sel:STATUS_OPTIONS},
               {k:"useCase",l:"Use Case",span:true,ph:"One-line AI use case description"},
@@ -1047,7 +1146,7 @@ export default function App() {
               </div>
             )}
             <div style={{fontSize:12,color:C.dim,marginBottom:14}}>
-              {exportScope === "all" ? `Exporting all ${entries.length} entries.` : `Exporting current subset (${semanticFiltered.length} entries).`}
+              {exportScope === "all" ? `Exporting all ${activeEntries.length} active entries.` : `Exporting current subset (${semanticFiltered.length} entries).`}
             </div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <button onClick={doExport} style={btnP}>Run Export</button>
@@ -1101,7 +1200,7 @@ export default function App() {
             ◆ BankAI Canvas
           </h1>
           <p style={{ margin:"3px 0 0", fontSize:12, color:C.dim }}>
-            {user.displayName || user.email} · {entries.length} source{entries.length!==1?"s":""}
+            {user.displayName || user.email} · {activeEntries.length} active source{activeEntries.length!==1?"s":""}
           </p>
         </div>
         <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
@@ -1109,6 +1208,7 @@ export default function App() {
             {key:"canvas",icon:"◉",label:"Canvas"},
             {key:"table",icon:"☰",label:"Table"},
             {key:"add",icon:"+",label:"Add"},
+            {key:"trash",icon:"🗑",label:`Trash (${trashEntries.length})`},
           ].map(v=>(
             <button key={v.key} onClick={()=>{setEditing(null);setView(v.key);}} style={{
               padding:"7px 16px", borderRadius:7,
@@ -1118,12 +1218,18 @@ export default function App() {
               cursor:"pointer", fontWeight:700, fontSize:12, fontFamily:"inherit",
             }}>{v.icon} {v.label}</button>
           ))}
-          <button onClick={()=>setExportOpen(true)} disabled={!entries.length} style={{
+          <button onClick={()=>setExportOpen(true)} disabled={!activeEntries.length} style={{
             padding:"7px 16px", borderRadius:7, border:`1px solid ${C.teal}`,
             background:C.tealSoft, color:C.teal,
-            cursor:entries.length?"pointer":"not-allowed",
-            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:entries.length?1:.4,
+            cursor:activeEntries.length?"pointer":"not-allowed",
+            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:activeEntries.length?1:.4,
           }}>↓ Export</button>
+          <button onClick={backfillExistingStructure} disabled={backfillLoading || !activeEntries.length} style={{
+            padding:"7px 14px", borderRadius:7, border:`1px solid ${C.violet}`,
+            background:C.violetSoft, color:C.violet,
+            cursor:(backfillLoading || !activeEntries.length)?"not-allowed":"pointer",
+            fontWeight:700, fontSize:12, fontFamily:"inherit", opacity:(backfillLoading || !activeEntries.length)?0.5:1,
+          }}>{backfillLoading ? "Backfilling…" : "Backfill Structure"}</button>
           <button onClick={()=>signOut(auth)} style={{
             padding:"7px 14px", borderRadius:7, border:`1px solid ${C.border}`,
             background:"transparent", color:C.dim,
@@ -1133,7 +1239,7 @@ export default function App() {
       </header>
 
       {/* ══════════ SEARCH & FILTERS ══════════ */}
-      {view!=="add" && (
+      {view!=="add" && view!=="trash" && (
         <div className="glass-panel" style={{ position:"sticky", top:8, zIndex:30, border:`1px solid ${C.border}`, borderRadius:12, padding:10, marginBottom:10, boxShadow:"0 6px 16px rgba(15,23,42,0.05)" }}>
           <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
           <div style={{ flex:"1 1 260px", position:"relative" }}>
@@ -1176,13 +1282,13 @@ export default function App() {
       )}
 
       {/* ══════════ STATS ══════════ */}
-      {view!=="add" && entries.length>0 && (
+      {view!=="add" && view!=="trash" && activeEntries.length>0 && (
         <div style={{ display:"flex", gap:12, flexWrap:"wrap", marginBottom:20 }}>
           {[
-            {n:entries.length,l:"Total Sources",c:C.accent},
-            {n:entries.filter(e=>e.status==="To Review").length,l:"To Review",c:C.amber},
-            {n:entries.filter(e=>e.status==="Key Finding").length,l:"Key Findings",c:C.violet},
-            {n:[...new Set(entries.map(e=>e.bank))].length,l:"Banks",c:C.teal},
+            {n:activeEntries.length,l:"Total Sources",c:C.accent},
+            {n:activeEntries.filter(e=>e.status==="To Review").length,l:"To Review",c:C.amber},
+            {n:activeEntries.filter(e=>e.status==="Key Finding").length,l:"Key Findings",c:C.violet},
+            {n:[...new Set(activeEntries.map(e=>e.bank))].length,l:"Banks",c:C.teal},
           ].map(s=>(
             <div key={s.l} style={{ flex:"1 1 120px", padding:"14px 18px", background:C.panel, borderRadius:12, border:`1px solid ${C.border}`, boxShadow:"0 4px 14px rgba(15,23,42,0.05)" }}>
               <div style={{ fontSize:22, fontWeight:800, color:s.c, fontFamily:"'JetBrains Mono',monospace" }}>{s.n}</div>
@@ -1192,8 +1298,38 @@ export default function App() {
         </div>
       )}
 
+      {view!=="add" && view!=="trash" && (
+        <div style={{marginBottom:18,padding:"12px 14px",border:`1px solid ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.86)"}}>
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:".6px",marginBottom:8}}>Confidence Guide</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:12,color:C.text}}>
+            <span style={pill("rgba(21,128,61,0.12)","#166534")}>High 80-100: strong explicit evidence</span>
+            <span style={pill("rgba(217,119,6,0.12)","#92400E")}>Medium 50-79: partial or inferred evidence</span>
+            <span style={pill("rgba(220,38,38,0.12)","#991B1B")}>Low 0-49: weak signals, review manually</span>
+          </div>
+        </div>
+      )}
+
       {/* ══════════ VIEWS ══════════ */}
       {view==="add" && <FormView />}
+
+      {view==="trash" && (
+        <div style={{display:"grid",gap:10}}>
+          {trashEntries.length ? trashEntries.map((e, i) => (
+            <div key={e.id} style={{padding:14,border:`1px solid ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.9)",display:"flex",justifyContent:"space-between",gap:12,alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:C.text}}>{e.title || `Deleted card ${i + 1}`}</div>
+                <div style={{fontSize:11,color:C.dim,marginTop:4}}>Deleted: {e.deletedAt || "unknown"}</div>
+              </div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                <button onClick={()=>restoreEntry(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.teal}`,background:C.tealSoft,color:C.teal,cursor:"pointer",fontWeight:700,fontSize:11}}>Restore</button>
+                <button onClick={()=>removeEntryPermanent(e.id)} style={{padding:"6px 12px",borderRadius:8,border:`1px solid ${C.rose}`,background:C.roseSoft,color:C.rose,cursor:"pointer",fontWeight:700,fontSize:11}}>Delete Permanently</button>
+              </div>
+            </div>
+          )) : (
+            <div style={{textAlign:"center",padding:40,color:C.dim,border:`1px dashed ${C.border}`,borderRadius:12,background:"rgba(255,255,255,0.8)"}}>Trash is empty</div>
+          )}
+        </div>
+      )}
 
       {/* TABLE */}
       {view==="table" && (
@@ -1201,7 +1337,7 @@ export default function App() {
           <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, fontFamily:"inherit" }}>
             <thead>
               <tr style={{ background:C.panel }}>
-                {["#","Title","Type","Bank","Category","AI Tech","Use Case","Impact","Status","Date"].map(h=>(
+                {["#","Title","Type","Bank","Division","Area","Scale","Category","AI Tech","Use Case","Impact","Status","Date"].map(h=>(
                   <th key={h} style={{ position:"sticky", top:0, zIndex:1, background:C.panel, padding:"11px 12px", textAlign:"left", color:C.dim, fontWeight:700, borderBottom:`1px solid ${C.border}`, fontSize:10, textTransform:"uppercase", letterSpacing:".5px", whiteSpace:"nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -1216,6 +1352,9 @@ export default function App() {
                   <td style={{padding:"9px 12px",color:C.text,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}</td>
                   <td style={{padding:"9px 12px"}}><span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span></td>
                   <td style={{padding:"9px 12px",color:C.text}}>{e.bank}</td>
+                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap"}}>{e.division||"Not specified"}</td>
+                  <td style={{padding:"9px 12px",color:C.muted,whiteSpace:"nowrap"}}>{e.area||"Not specified"}</td>
+                  <td style={{padding:"9px 12px",color:C.text,whiteSpace:"nowrap"}}>{e.scale||"Not specified"}</td>
                   <td style={{padding:"9px 12px",color:C.muted}}>{e.category}</td>
                   <td style={{padding:"9px 12px",color:C.text}}>{e.aiTech}</td>
                   <td style={{padding:"9px 12px",color:C.muted,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.useCase}</td>
@@ -1224,7 +1363,7 @@ export default function App() {
                   <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap"}}>{e.dateAdded}</td>
                 </tr>
               ))}
-              {!semanticFiltered.length && <tr><td colSpan={10} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
+              {!semanticFiltered.length && <tr><td colSpan={13} style={{padding:36,textAlign:"center",color:C.dim}}>No entries match</td></tr>}
             </tbody>
           </table>
         </div>
@@ -1318,6 +1457,9 @@ export default function App() {
                       <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span>
                       <span style={pill(C.tealSoft,C.teal)}>{e.bank}</span>
                       <span style={pill(C.violetSoft,C.violet)}>{e.category}</span>
+                      <span style={pill("rgba(14,116,144,0.10)","#0E7490")}>{e.division || "Not specified"}</span>
+                      <span style={pill("rgba(100,116,139,0.10)","#334155")}>{e.area || "Not specified"}</span>
+                      <span style={pill("rgba(22,163,74,0.10)","#15803D")}>{e.scale || "Not specified"}</span>
                       {typeof e.confidence?.overall === "number" && (
                         <span style={pill(C.amberSoft,C.amber)}>Confidence {e.confidence.overall}%</span>
                       )}
@@ -1330,6 +1472,10 @@ export default function App() {
                         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12}}>
                           <div><span style={{color:C.dim}}>AI Tech: </span><span style={{color:C.text}}>{e.aiTech||"—"}</span></div>
                           <div><span style={{color:C.dim}}>Impact: </span><span style={{color:C.text}}>{e.impact||"—"}</span></div>
+                          <div><span style={{color:C.dim}}>Division: </span><span style={{color:C.text}}>{e.division||"Not specified"}</span></div>
+                          <div><span style={{color:C.dim}}>Area: </span><span style={{color:C.text}}>{e.area||"Not specified"}</span></div>
+                          <div><span style={{color:C.dim}}>Scale: </span><span style={{color:C.text}}>{e.scale||"Not specified"}</span></div>
+                          <div><span style={{color:C.dim}}>Tech Sophistication: </span><span style={{color:C.text}}>{e.techSophistication||"Not specified"}</span></div>
                           <div style={{gridColumn:"1/-1"}}><span style={{color:C.dim}}>Use Case: </span><span style={{color:C.text}}>{e.useCase||"—"}</span></div>
                           {e.url && (
                             <div style={{gridColumn:"1/-1"}}>
@@ -1380,7 +1526,7 @@ export default function App() {
                 );
               })}
             </div>
-          ) : !entries.length ? (
+          ) : !activeEntries.length ? (
             <div style={{textAlign:"center",padding:"56px 20px"}}>
               <div style={{fontSize:44,marginBottom:10}}>◆</div>
               <div style={{fontSize:15,fontWeight:700,color:C.muted}}>Canvas is empty</div>

@@ -194,6 +194,30 @@ ${JSON.stringify(compactEntries).slice(0, 150000)}`;
         });
       }
 
+      if (action === "infer_structure") {
+        const structurePrompt = `You are an enterprise banking AI taxonomy analyst.
+
+Infer structure for this material. Return ONLY valid JSON:
+{
+  "division": "one of: Front Office, Operations, Corporate Functions, Engineering, Enablers, Not specified",
+  "area": "one of: Client Experience, Banker Enablement, Product, Operations, Risk and Audit, Engineering, Finance and Business Management, HR, Compliance, Data and Analytics, Other, Not specified",
+  "scale": "Small / Pilot / Department / Enterprise / Cross-enterprise / Not specified",
+  "tech_sophistication": "Basic / Intermediate / Advanced / Frontier / Not specified",
+  "impact": "brief impact statement or Not specified",
+  "confidence": {
+    "overall": "0-100 integer",
+    "structure": "0-100 integer"
+  }
+}
+
+Use conservative confidence when evidence is weak.
+Material:
+${String(content || "").slice(0, 5000)}`;
+
+        const structured = await callGeminiJson({ key, prompt: structurePrompt, maxOutputTokens: 320 });
+        return res.status(200).json(structured);
+      }
+
       let sourceText = content;
       let extracted = null;
 
@@ -226,11 +250,16 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text.
       "ai_technology": "specific AI/ML tech (NLP, Computer Vision, LLM, GenAI, ML, Deep Learning, RPA, etc.)",
       "use_case": "one-line description of the AI use case",
       "impact": "quantified impact if mentioned, or 'Not specified'",
+      "division": "Front Office / Operations / Corporate Functions / Engineering / Enablers / Not specified",
+      "area": "Client Experience / Banker Enablement / Product / Operations / Risk and Audit / Engineering / Finance and Business Management / HR / Compliance / Data and Analytics / Other / Not specified",
+      "scale": "Small / Pilot / Department / Enterprise / Cross-enterprise / Not specified",
+      "tech_sophistication": "Basic / Intermediate / Advanced / Frontier / Not specified",
       "tags": ["3-7 concise tags"],
       "confidence": {
         "overall": "0-100 integer",
         "category": "0-100 integer",
-        "bank": "0-100 integer"
+        "bank": "0-100 integer",
+        "structure": "0-100 integer"
       },
       "evidence": ["up to 3 short supporting quotes or facts from the source"]
     }
@@ -255,11 +284,16 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fi
   "ai_technology": "specific AI/ML tech (NLP, Computer Vision, LLM, GenAI, ML, Deep Learning, RPA, etc.)",
   "use_case": "one-line description of the AI use case",
   "impact": "quantified impact if mentioned, or 'Not specified'",
+  "division": "Front Office / Operations / Corporate Functions / Engineering / Enablers / Not specified",
+  "area": "Client Experience / Banker Enablement / Product / Operations / Risk and Audit / Engineering / Finance and Business Management / HR / Compliance / Data and Analytics / Other / Not specified",
+  "scale": "Small / Pilot / Department / Enterprise / Cross-enterprise / Not specified",
+  "tech_sophistication": "Basic / Intermediate / Advanced / Frontier / Not specified",
   "tags": ["3-7 concise tags"],
   "confidence": {
     "overall": "0-100 integer",
     "category": "0-100 integer",
-    "bank": "0-100 integer"
+    "bank": "0-100 integer",
+    "structure": "0-100 integer"
   },
   "evidence": ["up to 3 short supporting quotes or facts from the source"]
 }
@@ -286,8 +320,12 @@ Return ONLY a valid JSON object — no markdown, no backticks, no extra text. Fi
         ai_technology: "Unknown",
         use_case: "",
         impact: "Not specified",
+        division: "Not specified",
+        area: "Not specified",
+        scale: "Not specified",
+        tech_sophistication: "Not specified",
         tags: [],
-        confidence: { overall: 35, category: 35, bank: 35 },
+        confidence: { overall: 35, category: 35, bank: 35, structure: 35 },
         evidence: [],
         extracted: null,
       });
