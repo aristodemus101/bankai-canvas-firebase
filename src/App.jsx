@@ -305,6 +305,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [entriesLoading, setEntriesLoading] = useState(false);
+  const [hasBootedEntries, setHasBootedEntries] = useState(false);
   const [entries, setEntries] = useState([]);
   const [view, setView] = useState("canvas");
   const [viewLoading, setViewLoading] = useState(false);
@@ -448,6 +449,7 @@ export default function App() {
     const unsub = onSnapshot(q, (snap) => {
       setEntries(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       setEntriesLoading(false);
+      setHasBootedEntries(true);
     });
     return unsub;
   }, [user]);
@@ -1168,15 +1170,75 @@ export default function App() {
      ═══════════════════════════════════════════ */
   if (authLoading) {
     return (
-      <div style={{ minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <div style={{
+        minHeight:"100vh",
+        background:`radial-gradient(900px 500px at 20% 20%, rgba(37,99,235,0.16), transparent 55%), radial-gradient(700px 420px at 80% 30%, rgba(15,118,110,0.16), transparent 58%), ${C.bg}`,
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        padding:24,
+      }}>
         <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
-        <div style={{ color:C.muted, fontFamily:"'Manrope',sans-serif", fontSize:16 }}>Loading…</div>
+        <div style={{ width:"100%", maxWidth:520, background:"rgba(255,255,255,0.88)", border:`1px solid ${C.border}`, borderRadius:20, padding:28, boxShadow:"0 24px 60px rgba(2,6,23,0.12)", backdropFilter:"blur(14px)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:18 }}>
+            <div style={{ width:54, height:54, borderRadius:16, background:"linear-gradient(135deg, rgba(29,78,216,0.14), rgba(15,118,110,0.16))", display:"grid", placeItems:"center", fontSize:28 }}>◆</div>
+            <div>
+              <div style={{ fontFamily:"'JetBrains Mono',monospace", fontWeight:700, color:C.teal, fontSize:20 }}>BankAI Canvas</div>
+              <div style={{ color:C.dim, fontSize:12, marginTop:3 }}>Preparing your workspace</div>
+            </div>
+          </div>
+          <div style={{ display:"grid", gap:10 }}>
+            <div style={{ height:12, borderRadius:999, background:"linear-gradient(90deg, rgba(203,213,225,0.55), rgba(148,163,184,0.18), rgba(203,213,225,0.55))", backgroundSize:"200% 100%", animation:"shimmer 1.25s infinite" }} />
+            <div style={{ height:12, borderRadius:999, width:"82%", background:"linear-gradient(90deg, rgba(203,213,225,0.55), rgba(148,163,184,0.18), rgba(203,213,225,0.55))", backgroundSize:"200% 100%", animation:"shimmer 1.25s infinite" }} />
+            <div style={{ height:12, borderRadius:999, width:"68%", background:"linear-gradient(90deg, rgba(203,213,225,0.55), rgba(148,163,184,0.18), rgba(203,213,225,0.55))", backgroundSize:"200% 100%", animation:"shimmer 1.25s infinite" }} />
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginTop:18, color:C.muted, fontSize:13 }}>
+            <span style={{ width:14, height:14, borderRadius:"50%", border:`2px solid ${C.accent}`, borderTopColor:"transparent", animation:"spin .8s linear infinite" }} />
+            Loading secure session and workspace data…
+          </div>
+        </div>
       </div>
     );
   }
 
   if (!user) {
     return <AuthScreen />;
+  }
+
+  if (!hasBootedEntries) {
+    return (
+      <div style={{
+        minHeight:"100vh",
+        background:`radial-gradient(900px 500px at 20% 20%, rgba(37,99,235,0.16), transparent 55%), radial-gradient(700px 420px at 80% 30%, rgba(15,118,110,0.16), transparent 58%), ${C.bg}`,
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        padding:24,
+      }}>
+        <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@700&display=swap" rel="stylesheet" />
+        <div style={{ width:"100%", maxWidth:620, background:"rgba(255,255,255,0.9)", border:`1px solid ${C.border}`, borderRadius:20, padding:28, boxShadow:"0 24px 60px rgba(2,6,23,0.12)", backdropFilter:"blur(14px)" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", gap:16, marginBottom:20 }}>
+            <div>
+              <div style={{ fontFamily:"'JetBrains Mono',monospace", fontWeight:700, color:C.teal, fontSize:22 }}>BankAI Canvas</div>
+              <div style={{ color:C.dim, fontSize:12, marginTop:4 }}>Loading your active sources…</div>
+            </div>
+            <div style={{ width:54, height:54, borderRadius:18, background:"linear-gradient(135deg, rgba(29,78,216,0.14), rgba(15,118,110,0.16))", display:"grid", placeItems:"center", color:C.accent }}>
+              <span style={{ width:18, height:18, borderRadius:"50%", border:`3px solid ${C.accent}`, borderTopColor:"transparent", animation:"spin .8s linear infinite" }} />
+            </div>
+          </div>
+          <div style={{ display:"grid", gap:12 }}>
+            <div style={{ height:14, borderRadius:999, background:"linear-gradient(90deg, rgba(203,213,225,0.6), rgba(148,163,184,0.22), rgba(203,213,225,0.6))", backgroundSize:"200% 100%", animation:"shimmer 1.2s infinite" }} />
+            <div style={{ height:14, borderRadius:999, width:"92%", background:"linear-gradient(90deg, rgba(203,213,225,0.6), rgba(148,163,184,0.22), rgba(203,213,225,0.6))", backgroundSize:"200% 100%", animation:"shimmer 1.2s infinite" }} />
+            <div style={{ height:14, borderRadius:999, width:"76%", background:"linear-gradient(90deg, rgba(203,213,225,0.6), rgba(148,163,184,0.22), rgba(203,213,225,0.6))", backgroundSize:"200% 100%", animation:"shimmer 1.2s infinite" }} />
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap", marginTop:8 }}>
+              <span style={pill(C.accentSoft, C.accent)}>Syncing Firestore</span>
+              <span style={pill(C.tealSoft, C.teal)}>Preparing filters</span>
+              <span style={pill(C.violetSoft, C.violet)}>Warming the canvas</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   /* ═══════════════════════════════════════════
@@ -1301,6 +1363,7 @@ export default function App() {
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
         @keyframes drift{0%{transform:translateY(0px)}50%{transform:translateY(-4px)}100%{transform:translateY(0px)}}
+        @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
         html { scroll-behavior: smooth; }
         * { scrollbar-width: thin; scrollbar-color: #CBD5E1 transparent; }
         *::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -1669,7 +1732,7 @@ export default function App() {
                   <td style={{padding:"9px 12px",color:C.muted,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.category}</td>
                   <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:180}}>{e.aiTech}</td>
                   <td style={{padding:"9px 12px",color:C.muted,maxWidth:260,minWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",borderRight:`1px solid ${C.border}`}}>{e.useCase}</td>
-                  <td style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:170}}>{e.impact}</td>
+                  <td title={e.impact || ""} style={{padding:"9px 12px",color:C.text,borderRight:`1px solid ${C.border}`,minWidth:170,maxWidth:170,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.impact}</td>
                   <td style={{padding:"9px 12px",borderRight:`1px solid ${C.border}`,minWidth:140}}><span style={pill(`${statusC[e.status]}18`,statusC[e.status])}><span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}</span></td>
                   <td style={{padding:"9px 12px",color:C.dim,whiteSpace:"nowrap",minWidth:120}}>{e.dateAdded}</td>
                 </tr>
