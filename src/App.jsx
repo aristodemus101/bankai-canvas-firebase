@@ -231,6 +231,18 @@ const getBankPrefix = (bank) => BANK_PREFIXES[bank] || String(bank || "GEN")
   .join("")
   .slice(0, 8) || "GEN";
 
+const getProductHeadline = (entry) => {
+  const bankPrefix = getBankPrefix(entry?.bank);
+  const product = String(entry?.productName || entry?.title || "Untitled").trim();
+  const normalized = product.toLowerCase();
+  const bankLabel = String(entry?.bank || "").trim().toLowerCase();
+  const prefixLabel = String(bankPrefix || "").trim().toLowerCase();
+
+  if (!product) return `${bankPrefix} Untitled`;
+  if (normalized.startsWith(prefixLabel + " ") || normalized.startsWith(bankLabel + " ")) return product;
+  return `${bankPrefix} ${product}`;
+};
+
 /* ═══════════════════════════════════════════
    AUTH SCREEN
    ═══════════════════════════════════════════ */
@@ -1813,7 +1825,7 @@ export default function App() {
                     <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType || "Source"}</span>
                     {e.mergedIntoCode && <span style={pill(C.tealSoft,C.teal)}>Merged into {e.mergedIntoCode}</span>}
                   </div>
-                  <div style={{fontSize:14,fontWeight:800,color:C.text,lineHeight:1.35,overflowWrap:"anywhere"}}>{e.productName || e.title || `Deleted card ${i + 1}`}</div>
+                  <div style={{fontSize:14,fontWeight:800,color:C.text,lineHeight:1.35,overflowWrap:"anywhere"}}>{getProductHeadline(e)}</div>
                   {e.title && e.title !== e.productName && (
                     <div style={{fontSize:12,color:C.dim,marginTop:4,overflowWrap:"anywhere"}}>{e.title}</div>
                   )}
@@ -1966,8 +1978,9 @@ export default function App() {
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))", gap:14 }}>
               {semanticFiltered.map(e => {
                 const isOpen = expanded === e.id;
-                const displayProduct = e.productName || e.title || "Untitled";
-                const subtitleTitle = e.title && e.title !== displayProduct ? e.title : "";
+                const displayProduct = getProductHeadline(e);
+                const rawProduct = e.productName || e.title || "Untitled";
+                const subtitleTitle = e.title && e.title !== rawProduct ? e.title : "";
                 return (
                   <div key={e.id} onClick={()=>setExpanded(isOpen?null:e.id)} style={{
                     background:C.card, borderRadius:12, padding:18,
@@ -1979,13 +1992,15 @@ export default function App() {
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:12,flexWrap:"wrap"}}>
                       <div style={{minWidth:0,flex:1}}>
                         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
-                          <span style={pill(C.tealSoft,C.teal)}>{e.cardCode || `${getBankPrefix(e.bank)}-?`}</span>
                           <span style={pill(C.accentSoft,C.accent)}>{srcIcon[e.sourceType]||"📎"} {e.sourceType}</span>
                           <span style={pill(`${statusC[e.status]}18`,statusC[e.status])}>
                             <span style={{width:5,height:5,borderRadius:"50%",background:statusC[e.status]}}/> {e.status}
                           </span>
                         </div>
-                        <div style={{fontSize:18,fontWeight:800,color:C.text,lineHeight:1.2,overflowWrap:"anywhere"}}>{displayProduct}</div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:2}}>
+                          <div style={{fontSize:21,fontWeight:900,color:C.text,lineHeight:1.08,letterSpacing:"-0.6px",overflowWrap:"anywhere"}}>{displayProduct}</div>
+                          <span style={{...pill(C.tealSoft,C.teal),padding:"4px 9px",fontSize:10,letterSpacing:".4px"}}>{e.cardCode || `${getBankPrefix(e.bank)}-?`}</span>
+                        </div>
                         {subtitleTitle && (
                           <div style={{fontSize:12,color:C.dim,marginTop:4,overflowWrap:"anywhere"}}>{subtitleTitle}</div>
                         )}
